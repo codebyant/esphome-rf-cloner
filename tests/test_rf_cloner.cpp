@@ -614,6 +614,76 @@ void test_clear_preserves_identity() {
   CHECK(!reloaded.has_id(2));
 }
 
+void test_clear_is_idempotent() {
+  std::printf("store: clear only writes when it changes something\n");
+  FakeBackend backend;
+  CommandStore store;
+  store.configure(&backend, 8, 256, 12288, 0);
+  store.begin();
+  const std::string bridge = store.bridge_id_hex();
+
+  // Case 1: commands present. Normal clear, one write, one revision.
+  CHECK(store.put(make_command("a")) == StoreResult::OK);
+  CHECK(store.put(make_command("b")) == StoreResult::OK);
+  uint32_t revision = store.revision();
+  unsigned writes = backend.writes;
+  CHECK(store.clear_all() == StoreResult::OK);
+  CHECK(store.count() == 0);
+  CHECK(store.revision() == revision + 1);
+  CHECK(backend.writes > writes);
+  CHECK(store.bridge_id_hex() == bridge);
+  CHECK(store.next_command_id() == 3);
+
+  // Case 2: already empty, no restore open. Succeeds, but changes nothing at all.
+  revision = store.revision();
+  writes = backend.writes;
+  const std::map<uint32_t, std::vector<uint8_t>> untouched = backend.records;
+  CHECK(store.clear_all() == StoreResult::OK);
+  CHECK(store.revision() == revision);
+  CHECK(backend.writes == writes);
+  CHECK(backend.records == untouched);
+  // Still idempotent when repeated.
+  CHECK(store.clear_all() == StoreResult::OK);
+  CHECK(store.revision() == revision);
+  CHECK(backend.writes == writes);
+  // And the identity is untouched by a no-op.
+  CHECK(store.bridge_id_hex() == bridge);
+  CHECK(store.next_command_id() == 3);
+
+  // Case 3: a restore is open with nothing imported yet. The registry is empty, but there is
+  // still something to clear, so this must write and count as a mutation.
+  uint8_t adopted[BRIDGE_ID_BYTES];
+  std::memset(adopted, 0x6C, sizeof(adopted));
+  CHECK(store.restore_begin(adopted, 9) == StoreResult::OK);
+  CHECK(store.restore_incomplete());
+  CHECK(store.count() == 0);
+  revision = store.revision();
+  writes = backend.writes;
+  CHECK(store.clear_all() == StoreResult::OK);
+  CHECK(!store.restore_incomplete());
+  CHECK(store.revision() == revision + 1);
+  CHECK(backend.writes > writes);
+  // The adopted identity survives the abort, so the restore can simply be replayed.
+  CHECK(store.bridge_id_hex() == "6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c");
+  CHECK(store.next_command_id() == 9);
+
+  // Now that the restore is gone, clearing is a no-op again.
+  revision = store.revision();
+  writes = backend.writes;
+  CHECK(store.clear_all() == StoreResult::OK);
+  CHECK(store.revision() == revision);
+  CHECK(backend.writes == writes);
+
+  // The no-ops left nothing behind for the next boot to disagree about.
+  CommandStore reloaded;
+  reloaded.configure(&backend, 8, 256, 12288, 0);
+  const LoadReport report = reloaded.begin();
+  CHECK(report.loaded == 0);
+  CHECK(!report.restore_incomplete);
+  CHECK(reloaded.revision() == revision);
+  CHECK(reloaded.next_command_id() == 9);
+}
+
 void test_factory_reset() {
   std::printf("store: factory reset is the way out of read-only\n");
   FakeBackend backend;
@@ -1390,6 +1460,7 @@ int main() {
   test_id_exhaustion_fails_rather_than_wraps();
   test_rename();
   test_clear_preserves_identity();
+  test_clear_is_idempotent();
   test_factory_reset();
   test_restore_flow();
   test_restore_in_progress_blocks_normal_mutations();

@@ -115,6 +115,69 @@ api:
                 item["pulses"] = entry.pulse_count;
               }
 
+    # Portable representation of one command: everything needed to reproduce it on another
+    # bridge, and nothing else. `schema` versions this payload independently of the on-flash
+    # format, so the two can evolve separately. `modulation` is the stored code (0 = OOK) rather
+    # than a label, so an export round-trips exactly.
+    - action: ${rf_action_prefix}export
+      variables:
+        command_id: int
+      supports_response: only
+      then:
+        - api.respond:
+            data: !lambda |-
+              const auto &registry = id(${rf_cloner_id}).store();
+              esphome::rf_cloner::Command command;
+              root["schema"] = 1;
+              root["bridge_id"] = registry.bridge_id_hex();
+              if (!registry.get_by_id(command_id, command)) {
+                root["found"] = false;
+                return;
+              }
+              root["found"] = true;
+              root["command_id"] = command.command_id;
+              root["name"] = command.name;
+              root["pulses"] = command.timings.size();
+              root["gap_us"] = command.gap_us;
+              root["repeat_times"] = command.repeat_times;
+              root["frequency_hz"] = command.frequency_hz;
+              root["modulation"] = command.modulation;
+              JsonArray timings = root["timings"].to<JsonArray>();
+              for (int32_t value : command.timings) {
+                timings.add(value);
+              }
+
+    # Restore is explicit and three-phase: adopt the identity, import each command under the id it
+    # held, then commit. Until the commit lands, rf_status reports restore_incomplete and normal
+    # mutations are refused, so an interrupted restore is visible rather than silently partial.
+    - action: ${rf_action_prefix}restore_begin
+      variables:
+        bridge_id: string
+        next_command_id: int
+      then:
+        - lambda: |-
+            id(${rf_cloner_id}).restore_begin(bridge_id, next_command_id);
+
+    - action: ${rf_action_prefix}import
+      variables:
+        command_id: int
+        name: string
+        timings: int[]
+        gap_us: int
+        repeat_times: int
+        frequency_hz: int
+        modulation: int
+      then:
+        - lambda: |-
+            std::vector<int32_t> pulses(timings.begin(), timings.end());
+            id(${rf_cloner_id}).import_command(command_id, name, pulses, gap_us, repeat_times, frequency_hz,
+                                               modulation);
+
+    - action: ${rf_action_prefix}restore_commit
+      then:
+        - lambda: |-
+            id(${rf_cloner_id}).restore_commit();
+
     # Superseded by rf_status; kept for existing standalone scripts.
     - action: ${rf_action_prefix}list
       supports_response: only

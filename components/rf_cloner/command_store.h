@@ -174,7 +174,10 @@ class CommandStore {
 
   /// Drop every command while keeping the logical identity: bridge_id and next_command_id are
   /// preserved, so a cleared bridge is still the same bridge and no id is ever handed out twice.
-  /// Also abandons an unfinished restore.
+  /// Also abandons an unfinished restore, which is what makes it the abort for one.
+  ///
+  /// Idempotent: on an empty registry with no restore open it succeeds without writing and
+  /// without advancing the revision, so a redundant clear does not look like a change.
   StoreResult clear_all();
 
   /// Discard everything, including the identity, and write a fresh empty registry.

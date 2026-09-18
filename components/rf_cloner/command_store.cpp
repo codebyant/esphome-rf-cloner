@@ -577,6 +577,11 @@ StoreResult CommandStore::clear_all() {
   if (this->read_only_) {
     return StoreResult::READ_ONLY;
   }
+  if (this->count() == 0 && this->restore_state_ == 0) {
+    // Already the target state. Writing anyway would advance the revision and make every reader
+    // re-read the registry for a change that did not happen.
+    return StoreResult::OK;
+  }
 
   std::vector<Command> previous = this->slots_;
   const uint32_t previous_revision = this->revision_;

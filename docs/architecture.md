@@ -123,6 +123,12 @@ under an existing name overwrites that command in place and keeps its id, so any
 id survives. Deleting frees the slot but not the id, and `clear_all` keeps `bridge_id` and
 `next_command_id` — clearing the commands does not make this a different bridge.
 
+`revision` advances once per committed mutation and only when something actually changed:
+renaming a command to the name it already has, or clearing a registry that is already empty with
+no restore open, both succeed without writing. A reader can therefore treat a changed `revision`
+as a real change. Clearing *does* write when a restore is open, even with nothing imported yet,
+because abandoning the restore is itself a change.
+
 Identity and slots live in the same record because assigning an id and advancing
 `next_command_id` must commit together; a separate metadata record would leave a window where a
 crash could hand the same id out twice.

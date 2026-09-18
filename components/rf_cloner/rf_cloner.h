@@ -98,6 +98,13 @@ class RfCloner : public Component, public remote_base::RemoteReceiverListener {
   /// unreadable data usable again.
   bool factory_reset();
 
+  /// Adopt an external bridge identity, given as 32 hex characters, and open a restore.
+  bool restore_begin(const std::string &bridge_id_hex, uint32_t next_command_id);
+  /// Write one exported command back under the id it had on the bridge being restored.
+  bool import_command(uint32_t command_id, const std::string &name, const std::vector<int32_t> &timings,
+                      uint32_t gap_us, uint16_t repeat_times, uint32_t frequency_hz, uint8_t modulation);
+  bool restore_commit();
+
   LearnState state() const { return this->state_; }
   const std::string &last_result() const { return this->last_result_; }
   const CommandStore &store() const { return this->store_; }

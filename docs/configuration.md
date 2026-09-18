@@ -156,7 +156,52 @@ Merges with an existing `api:` block, so a device's own actions are kept.
 | `rf_delete` | `name` | Delete by name; the id is not recycled |
 | `rf_clear` | — | Drop every command, keeping `bridge_id` and `next_command_id` |
 | `rf_factory_reset` | — | Discard the registry and its identity; the only escape from read-only |
+| `rf_export` | `command_id` | One command as a portable JSON record, waveform included |
+| `rf_restore_begin` | `bridge_id`, `next_command_id` | Adopt an identity and open a restore |
+| `rf_import` | `command_id`, `name`, `timings`, `gap_us`, `repeat_times`, `frequency_hz`, `modulation` | Write one exported command back under its original id |
+| `rf_restore_commit` | — | Close the restore |
 | `rf_list` | — | Older name-only read, superseded by `rf_status` |
+
+### Export and restore
+
+`rf_export` returns everything needed to reproduce one command on another bridge, and nothing
+else:
+
+```json
+{
+  "schema": 1,
+  "found": true,
+  "bridge_id": "b7397c870440b9228377fbdb4ed95624",
+  "command_id": 2,
+  "name": "probe_2",
+  "pulses": 65,
+  "gap_us": 8669,
+  "repeat_times": 20,
+  "frequency_hz": 433920000,
+  "modulation": 0,
+  "timings": [242, -744, 244, -739, ...]
+}
+```
+
+`schema` versions this payload independently of the on-flash format, so the two evolve separately.
+`modulation` is the stored code (`0` = OOK) rather than a label, so an export round-trips exactly.
+One command per call keeps each response around a kilobyte, well inside the API message limit.
+
+Restoring is explicit and three-phase, so a half-finished restore is visible rather than silently
+partial:
+
+```
+rf_restore_begin(bridge_id, next_command_id)
+rf_import(...)   once per command
+rf_restore_commit()
+```
+
+`rf_restore_begin` is accepted only on an empty registry — that is what keeps a stale backup from
+overwriting a live bridge — and rejects a `bridge_id` that is not exactly 32 hex characters.
+Between begin and commit, `rf_status` reports `restore_incomplete: true` and normal mutations are
+refused; `rf_clear` abandons the attempt, keeping the adopted identity so it can simply be
+replayed. An interrupted restore survives a reboot as `restore_incomplete`, and replaying it from
+the same export is the recovery path.
 
 | Variable | Default | Meaning |
 |---|---|---|

@@ -566,6 +566,103 @@ void RfCloner::clear_all() {
   this->publish_store_stats_();
 }
 
+namespace {
+
+/// Parse 32 hex characters into the 16 raw bytes of a bridge id. Returns false on anything else,
+/// so a typo cannot silently produce a different identity than the one being restored.
+bool parse_bridge_id(const std::string &text, uint8_t *out) {
+  if (text.size() != BRIDGE_ID_BYTES * 2) {
+    return false;
+  }
+  for (size_t i = 0; i < BRIDGE_ID_BYTES; i++) {
+    uint8_t byte = 0;
+    for (size_t nibble = 0; nibble < 2; nibble++) {
+      const char c = text[i * 2 + nibble];
+      uint8_t value;
+      if (c >= '0' && c <= '9') {
+        value = static_cast<uint8_t>(c - '0');
+      } else if (c >= 'a' && c <= 'f') {
+        value = static_cast<uint8_t>(c - 'a' + 10);
+      } else if (c >= 'A' && c <= 'F') {
+        value = static_cast<uint8_t>(c - 'A' + 10);
+      } else {
+        return false;
+      }
+      byte = static_cast<uint8_t>((byte << 4) | value);
+    }
+    out[i] = byte;
+  }
+  return true;
+}
+
+}  // namespace
+
+bool RfCloner::restore_begin(const std::string &bridge_id_hex, uint32_t next_command_id) {
+  uint8_t bridge_id[BRIDGE_ID_BYTES];
+  if (!parse_bridge_id(bridge_id_hex, bridge_id)) {
+    ESP_LOGE(TAG, "Cannot start restore: '%s' is not 32 hex characters", bridge_id_hex.c_str());
+    this->last_result_ = "restore_failed:bad_bridge_id";
+    this->publish_state_();
+    return false;
+  }
+
+  const StoreResult result = this->store_.restore_begin(bridge_id, next_command_id);
+  if (result != StoreResult::OK) {
+    ESP_LOGE(TAG, "Cannot start restore: %s", store_result_to_string(result));
+    this->last_result_ = std::string("restore_failed:") + store_result_to_string(result);
+    this->publish_state_();
+    return false;
+  }
+  ESP_LOGW(TAG, "Restore started: adopting bridge id %s, next command id %" PRIu32,
+           this->store_.bridge_id_hex().c_str(), next_command_id);
+  this->last_result_ = "restore_started";
+  this->publish_state_();
+  return true;
+}
+
+bool RfCloner::import_command(uint32_t command_id, const std::string &name, const std::vector<int32_t> &timings,
+                              uint32_t gap_us, uint16_t repeat_times, uint32_t frequency_hz, uint8_t modulation) {
+  Command command;
+  command.command_id = command_id;
+  command.name = name;
+  command.timings = timings;
+  command.gap_us = gap_us;
+  command.repeat_times = repeat_times;
+  command.frequency_hz = frequency_hz;
+  command.modulation = modulation;
+
+  const StoreResult result = this->store_.import_command(command);
+  if (result != StoreResult::OK) {
+    ESP_LOGE(TAG, "Cannot import '%s' (#%" PRIu32 "): %s", name.c_str(), command_id,
+             store_result_to_string(result));
+    this->last_result_ = std::string("import_failed:") + store_result_to_string(result);
+    this->publish_state_();
+    return false;
+  }
+  ESP_LOGI(TAG, "Imported '%s' (#%" PRIu32 "): %u pulses, gap %" PRIu32 " us", name.c_str(), command_id,
+           static_cast<unsigned>(timings.size()), gap_us);
+  this->last_result_ = "imported:" + name;
+  this->publish_state_();
+  this->publish_store_stats_();
+  return true;
+}
+
+bool RfCloner::restore_commit() {
+  const StoreResult result = this->store_.restore_commit();
+  if (result != StoreResult::OK) {
+    ESP_LOGE(TAG, "Cannot commit restore: %s", store_result_to_string(result));
+    this->last_result_ = std::string("restore_commit_failed:") + store_result_to_string(result);
+    this->publish_state_();
+    return false;
+  }
+  ESP_LOGW(TAG, "Restore committed: %u command(s), bridge id %s", static_cast<unsigned>(this->store_.count()),
+           this->store_.bridge_id_hex().c_str());
+  this->last_result_ = "restore_committed";
+  this->publish_state_();
+  this->publish_store_stats_();
+  return true;
+}
+
 bool RfCloner::factory_reset() {
   const StoreResult result = this->store_.factory_reset();
   if (result != StoreResult::OK) {
