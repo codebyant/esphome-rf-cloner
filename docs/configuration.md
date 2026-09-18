@@ -174,7 +174,7 @@ else:
 {
   "schema": 1,
   "found": true,
-  "bridge_id": "b7397c870440b9228377fbdb4ed95624",
+  "bridge_id": "0123456789abcdef0123456789abcdef",
   "command_id": 2,
   "name": "probe_2",
   "pulses": 65,
@@ -233,7 +233,7 @@ response_variable: rf
 
 ```json
 {
-  "bridge_id": "b7397c870440b9228377fbdb4ed95624",
+  "bridge_id": "0123456789abcdef0123456789abcdef",
   "revision": 5,
   "next_command_id": 3,
   "restore_incomplete": false,
