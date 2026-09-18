@@ -1,0 +1,224 @@
+# Reference configuration for the RF learning bridge.
+#
+# Learn a command by name, store it on the device, and replay it later - no recompile per
+# command. Requires ESPHome >= 2026.1 and the rf_cloner component in ../components.
+#
+# See docs/hardware.md for wiring and docs/configuration.md for every option.
+
+substitutions:
+  name: rf-bridge
+
+esphome:
+  name: ${name}
+  friendly_name: RF Bridge
+  on_boot:
+    # The radio must be listening once setup completes.
+    priority: -100
+    then:
+      - cc1101.begin_rx: cc1101_radio
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [rf_cloner]
+
+esp32:
+  variant: esp32
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+api:
+  actions:
+    # Convenience layer for automations; the entities below are the primary surface.
+    - action: rf_learn
+      variables:
+        name: string
+      then:
+        - rf_cloner.learn:
+            id: cloner
+            name: !lambda "return name;"
+
+    - action: rf_send
+      variables:
+        name: string
+      then:
+        - rf_cloner.send:
+            id: cloner
+            name: !lambda "return name;"
+
+    - action: rf_delete
+      variables:
+        name: string
+      then:
+        - rf_cloner.delete:
+            id: cloner
+            name: !lambda "return name;"
+
+    - action: rf_cancel
+      then:
+        - rf_cloner.cancel: cloner
+
+    - action: rf_list
+      supports_response: only
+      then:
+        - api.respond:
+            data: !lambda |-
+              JsonArray commands = root["commands"].to<JsonArray>();
+              for (const auto &command_name : id(cloner).store().names()) {
+                commands.add(command_name);
+              }
+              root["count"] = id(cloner).store().count();
+              root["max_commands"] = id(cloner).store().max_commands();
+              root["used_bytes"] = id(cloner).store().used_bytes();
+              root["capacity_bytes"] = id(cloner).store().capacity_bytes();
+              root["state"] = esphome::rf_cloner::learn_state_to_string(id(cloner).state());
+              root["last_result"] = id(cloner).last_result();
+  encryption:
+      key: !secret api_key
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# Renders the entities below as a local control page, so the bridge stays usable with Home
+# Assistant offline.
+web_server:
+  port: 80
+
+# Radio. Verify any change with config/hardware-check.yaml.
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+
+cc1101:
+  id: cc1101_radio
+  cs_pin: GPIO5
+  frequency: 433.92MHz
+  modulation_type: ASK/OOK
+  output_power: 10
+  symbol_rate: 5000
+  filter_bandwidth: 203kHz
+
+# GDO2 -> receive
+remote_receiver:
+  id: rf_rx
+  pin: GPIO4
+  # Below the shortest pulse the target emits.
+  filter: 100us
+  # Above the target's inter-frame gap, so a window holds several repeats and rf_cloner can read
+  # the gap from the waveform instead of inferring it. Must stay below the pause between separate
+  # button presses, and below the 65536 us ceiling the ESP32's RMT imposes on `idle`.
+  # Lowering this to frame each repeat separately still works, via a less precise fallback.
+  idle: 30ms
+  buffer_size: 10kB
+
+# GDO0 -> transmit
+remote_transmitter:
+  id: rf_tx
+  pin: GPIO22
+  # Required for RF: the CC1101 handles modulation itself. rf_cloner rejects any other value
+  # during config validation.
+  carrier_duty_percent: 100%
+  # A repeated replay occupies the air for most of a second; blocking would stall the main loop
+  # for that whole time.
+  non_blocking: true
+  on_transmit:
+    then:
+      - cc1101.begin_tx: cc1101_radio
+  on_complete:
+    then:
+      - cc1101.begin_rx: cc1101_radio
+
+rf_cloner:
+  id: cloner
+  receiver_id: rf_rx
+  transmitter_id: rf_tx
+  max_commands: 16
+  max_pulses: 128
+  max_storage_bytes: 12288
+  # Replay defaults, overridable per command.
+  default_repeat_times: 20
+  default_gap: 10ms
+  on_learn_success:
+    then:
+      - logger.log:
+          format: "Learned '%s'"
+          args: ["x.c_str()"]
+  on_learn_failed:
+    then:
+      - logger.log:
+          level: WARN
+          format: "Learn failed: %s"
+          args: ["x.c_str()"]
+
+# Control surface. ESPHome fixes its entity list at compile time, so learned commands cannot each
+# become an entity; these static controls act on any command by name instead.
+
+text:
+  - platform: template
+    id: rf_command_name
+    name: "Command name"
+    optimistic: true
+    restore_value: true
+    mode: text
+    min_length: 0
+    max_length: 23
+    icon: mdi:form-textbox
+
+button:
+  - platform: template
+    name: "Learn command"
+    icon: mdi:radio-tower
+    on_press:
+      - rf_cloner.learn:
+          id: cloner
+          name: !lambda "return id(rf_command_name).state;"
+
+  - platform: template
+    name: "Send command"
+    icon: mdi:send
+    on_press:
+      - rf_cloner.send:
+          id: cloner
+          name: !lambda "return id(rf_command_name).state;"
+
+  - platform: template
+    name: "Delete command"
+    icon: mdi:delete
+    entity_category: config
+    on_press:
+      - rf_cloner.delete:
+          id: cloner
+          name: !lambda "return id(rf_command_name).state;"
+
+  - platform: template
+    name: "Cancel learning"
+    icon: mdi:cancel
+    entity_category: config
+    on_press:
+      - rf_cloner.cancel: cloner
+
+text_sensor:
+  - platform: rf_cloner
+    rf_cloner_id: cloner
+    state:
+      name: "Learn state"
+    last_result:
+      name: "Last result"
+
+sensor:
+  - platform: rf_cloner
+    rf_cloner_id: cloner
+    command_count:
+      name: "Stored commands"
+    storage_used:
+      name: "Storage used"

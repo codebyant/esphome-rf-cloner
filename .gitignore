@@ -1,0 +1,10 @@
+.esphome/
+.pioenvs/
+.piolibdeps/
+secrets.yaml
+*.bin
+__pycache__/
+tests/test_rf_cloner
+tests/test_rf_cloner.exe
+tests/*.o
+tests/*.log

@@ -1,0 +1,107 @@
+# Hardware verification using upstream ESPHome components only.
+#
+# Flash this before rf-bridge.yaml to confirm the CC1101 is wired correctly, that a held remote
+# button produces clean framed captures, and that replaying one drives the target device. Re-run
+# it after any change to wiring, capture tuning or CC1101 settings.
+#
+# Requires ESPHome >= 2026.1. See docs/hardware.md for wiring and tuning.
+
+substitutions:
+  name: rf-bridge
+
+esphome:
+  name: ${name}
+  friendly_name: RF Bridge
+  on_boot:
+    # The radio must be listening once setup completes.
+    priority: -100
+    then:
+      - cc1101.begin_rx: cc1101_radio
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# --- Radio ------------------------------------------------------------------
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+
+cc1101:
+  id: cc1101_radio
+  cs_pin: GPIO5
+  frequency: 433.92MHz
+  modulation_type: ASK/OOK
+  output_power: 10
+  # Starting point. If short pulses are mangled or missing, try a lower rate and adjust
+  # filter_bandwidth; see docs/hardware.md.
+  symbol_rate: 5000
+  filter_bandwidth: 203kHz
+
+# GDO2 -> receive
+remote_receiver:
+  id: rf_rx
+  pin: GPIO4
+  dump: raw
+  # Below the shortest pulse the target emits; the 250us in ESPHome's RF guide is too coarse for
+  # remotes with sub-250us symbols.
+  filter: 100us
+  # Below the target's inter-frame gap, so each repeat is framed separately.
+  idle: 4ms
+  buffer_size: 10kB
+  on_raw:
+    then:
+      - logger.log:
+          format: "raw frame: %d pulses"
+          args: ["(int) x.size()"]
+
+# GDO0 -> transmit
+remote_transmitter:
+  id: rf_tx
+  pin: GPIO22
+  # Required for RF: the CC1101 handles modulation itself.
+  carrier_duty_percent: 100%
+  on_transmit:
+    then:
+      - cc1101.begin_tx: cc1101_radio
+  on_complete:
+    then:
+      - cc1101.begin_rx: cc1101_radio
+
+# Replace `code:` with a frame from your own `dump: raw` output, then press this button and
+# confirm the target device responds. The frame below is a 433 MHz OOK capture used during
+# development, kept as a format example.
+
+button:
+  - platform: template
+    name: "Replay captured frame"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          transmitter_id: rf_tx
+          code:
+            [
+              280, -710, 257, -714, 249, -729, 244, -731, 286, -684,
+              278, -724, 247, -730, 724, -248, 743, -259, 713, -231,
+              743, -247, 734, -248, 723, -234, 269, -717, 274, -702,
+              753, -231, 754, -222, 286, -700, 281, -680, 274, -704,
+              753, -229, 267, -718, 250, -732, 269, -706, 268, -703,
+              759, -247, 731, -226, 745, -225, 756, -250, 258, -703,
+              755, -220, 267, -711, 278,
+            ]
+          repeat:
+            times: 20
+            wait_time: 8658us
