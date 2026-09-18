@@ -32,6 +32,26 @@ template<typename... Ts> class SendAction : public Action<Ts...>, public Parente
   }
 };
 
+template<typename... Ts> class SendByIdAction : public Action<Ts...>, public Parented<RfCloner> {
+ public:
+  TEMPLATABLE_VALUE(uint32_t, command_id)
+  TEMPLATABLE_VALUE(uint16_t, repeat_times)
+  TEMPLATABLE_VALUE(uint32_t, gap)
+
+  void play(const Ts &...x) override {
+    this->parent_->send_by_id(this->command_id_.value(x...), this->repeat_times_.value_or(x..., 0),
+                              this->gap_.value_or(x..., 0));
+  }
+};
+
+template<typename... Ts> class RenameAction : public Action<Ts...>, public Parented<RfCloner> {
+ public:
+  TEMPLATABLE_VALUE(uint32_t, command_id)
+  TEMPLATABLE_VALUE(std::string, name)
+
+  void play(const Ts &...x) override { this->parent_->rename(this->command_id_.value(x...), this->name_.value(x...)); }
+};
+
 template<typename... Ts> class DeleteAction : public Action<Ts...>, public Parented<RfCloner> {
  public:
   TEMPLATABLE_VALUE(std::string, name)
@@ -42,6 +62,11 @@ template<typename... Ts> class DeleteAction : public Action<Ts...>, public Paren
 template<typename... Ts> class ClearAllAction : public Action<Ts...>, public Parented<RfCloner> {
  public:
   void play(const Ts &...x) override { this->parent_->clear_all(); }
+};
+
+template<typename... Ts> class FactoryResetAction : public Action<Ts...>, public Parented<RfCloner> {
+ public:
+  void play(const Ts &...x) override { this->parent_->factory_reset(); }
 };
 
 class LearnStartedTrigger : public Trigger<std::string> {

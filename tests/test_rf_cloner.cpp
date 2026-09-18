@@ -8,10 +8,26 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cinttypes>
 #include <map>
 #include <string>
 #include <vector>
+
+namespace esphome::rf_cloner {
+
+/// Deterministic stand-in for the device's random_bytes(). Every call returns a different value,
+/// so two freshly initialised stores still get distinct bridge ids, but a test run is repeatable.
+bool store_random_bytes(uint8_t *out, size_t len) {
+  static uint32_t counter = 0;
+  counter++;
+  for (size_t i = 0; i < len; i++) {
+    out[i] = static_cast<uint8_t>((counter * 2654435761u) >> (8 * (i % 4))) ^ static_cast<uint8_t>(i);
+  }
+  return true;
+}
+
+}  // namespace esphome::rf_cloner
 
 using namespace esphome::rf_cloner;
 
@@ -31,11 +47,17 @@ void check(bool condition, const char *what) {
 #define CHECK(cond) check((cond), #cond)
 
 /// In-memory stand-in for ESPHome preferences, with the same exact-length load semantics.
+///
+/// `fail_after` models a power cut: every save up to that count lands, the rest are refused, and
+/// `records` then holds exactly what flash would hold at that instant.
 class FakeBackend : public StorageBackend {
  public:
   bool save(uint32_t key, const uint8_t *data, size_t len) override {
     if (this->fail_next_save) {
       this->fail_next_save = false;
+      return false;
+    }
+    if (this->fail_after >= 0 && this->writes >= static_cast<unsigned>(this->fail_after)) {
       return false;
     }
     this->records[key] = std::vector<uint8_t>(data, data + len);
@@ -57,8 +79,34 @@ class FakeBackend : public StorageBackend {
   std::map<uint32_t, std::vector<uint8_t>> records;
   unsigned writes{0};
   bool fail_next_save{false};
+  /// Refuse every save once this many have landed. Negative disables it.
+  int fail_after{-1};
 };
 
+
+/// Independent CRC-16/CCITT, so a test that hand-edits a stored record computes the check value
+/// without borrowing the implementation it is checking.
+uint16_t fixture_crc16(const uint8_t *data, size_t len) {
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= static_cast<uint16_t>(data[i]) << 8;
+    for (int bit = 0; bit < 8; bit++) {
+      crc = (crc & 0x8000u) != 0 ? static_cast<uint16_t>((crc << 1) ^ 0x1021u) : static_cast<uint16_t>(crc << 1);
+    }
+  }
+  return crc;
+}
+
+/// The NVS key the store writes its header under, so a test can plant a record the store must
+/// refuse. Restated here rather than shared, for the same reason as the CRC above.
+uint32_t header_key_for(uint32_t salt) {
+  uint32_t hash = 2166136261UL;
+  for (const char *p = "rf_cloner/hdr/v1"; *p != '\0'; p++) {
+    hash ^= static_cast<uint8_t>(*p);
+    hash *= 16777619UL;
+  }
+  return hash ^ salt;
+}
 /// A real 65-pulse 433 MHz OOK capture, used as the fixture throughout these tests.
 const std::vector<int32_t> &reference_frame() {
   static const std::vector<int32_t> frame = {
@@ -284,6 +332,7 @@ void test_name_validation() {
   CHECK(CommandStore::validate_name("fan/speed") == StoreResult::NAME_INVALID);
 }
 
+
 Command make_command(const std::string &name, size_t pulses = 65) {
   Command command;
   command.name = name;
@@ -294,6 +343,43 @@ Command make_command(const std::string &name, size_t pulses = 65) {
   return command;
 }
 
+/// Bytes the header and index occupy before any waveform, for a store of `slots` slots.
+constexpr uint32_t overhead(uint8_t slots) { return 10 + 28 + static_cast<uint32_t>(slots) * 44 + 2; }
+
+/// Drive a store into read-only mode by damaging the header of a registry it wrote itself.
+void corrupt_header(FakeBackend &backend, uint32_t salt = 0) {
+  std::vector<uint8_t> &header = backend.records[header_key_for(salt)];
+  header[0] ^= 0xFF;  // breaks both magic and CRC
+}
+
+/// Plant what a pre-release build left behind: our magic and our version number, but an index laid
+/// out differently. The declared length is what catches it, and no slot count can make the two
+/// agree, since n*40 + 2 == 28 + n*44 + 2 has no solution.
+void plant_foreign_layout(FakeBackend &backend, uint8_t slot_count = 16, uint32_t salt = 0) {
+  std::vector<uint8_t> header(10, 0);
+  header[0] = 0x46;  // magic 0x5246, little-endian
+  header[1] = 0x52;
+  header[2] = STORE_FORMAT_VERSION;
+  header[3] = slot_count;
+  const uint16_t foreign_index_bytes = static_cast<uint16_t>(slot_count * 40 + 2);
+  header[4] = static_cast<uint8_t>(foreign_index_bytes & 0xFF);
+  header[5] = static_cast<uint8_t>(foreign_index_bytes >> 8);
+  const uint16_t crc = fixture_crc16(header.data(), 8);
+  header[8] = static_cast<uint8_t>(crc & 0xFF);
+  header[9] = static_cast<uint8_t>(crc >> 8);
+  backend.records[header_key_for(salt)] = header;
+}
+
+void test_layout_constants() {
+  std::printf("store: on-flash sizes\n");
+  // Locked by the design: growing these silently would push the registry past max_storage_bytes
+  // on a device that previously fit.
+  CHECK(CommandStore::index_overhead_bytes(16) == 744);
+  CHECK(CommandStore::index_overhead_bytes(16) == overhead(16));
+  CHECK(CommandStore::index_overhead_bytes(4) == overhead(4));
+  CHECK(STORE_FORMAT_VERSION == 1);
+}
+
 void test_store_roundtrip() {
   std::printf("store: round-trip across a simulated reboot\n");
   FakeBackend backend;
@@ -302,65 +388,412 @@ void test_store_roundtrip() {
   store.configure(&backend, 16, 256, 12288, 0);
   store.begin();
   CHECK(store.count() == 0);
+  CHECK(!store.read_only());
+  // A fresh device mints and persists its identity immediately, so bridge_id is stable from the
+  // first boot rather than changing until the first learn.
+  const std::string bridge = store.bridge_id_hex();
+  CHECK(bridge.size() == 32);
+  CHECK(bridge != std::string(32, '0'));
 
   CHECK(store.put(make_command("vel_1")) == StoreResult::OK);
   CHECK(store.put(make_command("vel_2", 40)) == StoreResult::OK);
   CHECK(store.count() == 2);
+  CHECK(store.has_id(1));
+  CHECK(store.has_id(2));
+  CHECK(store.next_command_id() == 3);
 
   // Reboot: fresh store object, same flash contents.
   CommandStore reloaded;
   reloaded.configure(&backend, 16, 256, 12288, 0);
   const LoadReport report = reloaded.begin();
   CHECK(report.had_stored_data);
+  CHECK(report.stored_format_version == STORE_FORMAT_VERSION);
   CHECK(!report.header_invalid);
   CHECK(!report.version_mismatch);
+  CHECK(!report.read_only);
+  CHECK(!report.restore_incomplete);
   CHECK(report.loaded == 2);
-  CHECK(report.dropped_corrupt == 0);
+  CHECK(report.payload_faults == 0 && report.dropped_unfittable == 0);
   CHECK(reloaded.count() == 2);
+  CHECK(reloaded.bridge_id_hex() == bridge);
+  CHECK(reloaded.next_command_id() == 3);
+  CHECK(reloaded.revision() == store.revision());
 
   Command out;
   CHECK(reloaded.get("vel_1", out));
+  CHECK(out.command_id == 1);
   CHECK(out.timings == reference_frame());
   CHECK(out.gap_us == 8658);
   CHECK(out.repeat_times == 20);
   CHECK(out.frequency_hz == 433920000);
-  CHECK(reloaded.get("vel_2", out));
+  CHECK(reloaded.get_by_id(2, out));
+  CHECK(out.name == "vel_2");
   CHECK(out.timings.size() == 40);
   CHECK(!reloaded.get("nope", out));
+  CHECK(!reloaded.get_by_id(99, out));
+  CHECK(!reloaded.get_by_id(COMMAND_ID_NONE, out));
+
+  const std::vector<CommandEntry> rows = reloaded.entries();
+  CHECK(rows.size() == 2);
+  CHECK(rows[0].command_id == 1 && rows[0].name == "vel_1" && rows[0].pulse_count == 65);
+  CHECK(rows[1].command_id == 2 && rows[1].name == "vel_2" && rows[1].pulse_count == 40);
 }
 
-void test_store_overwrite_and_delete() {
-  std::printf("store: overwrite, delete, slot reuse\n");
+void test_relearn_preserves_command_id() {
+  std::printf("store: relearning a name keeps its command id\n");
   FakeBackend backend;
   CommandStore store;
   store.configure(&backend, 4, 256, 12288, 0);
   store.begin();
 
   CHECK(store.put(make_command("a")) == StoreResult::OK);
-  CHECK(store.count() == 1);
-
-  // Relearning under an existing name overwrites in place - this is what replaces a rename API.
-  Command shorter = make_command("a", 20);
-  CHECK(store.put(shorter) == StoreResult::OK);
-  CHECK(store.count() == 1);
+  CHECK(store.put(make_command("b")) == StoreResult::OK);
   Command out;
   CHECK(store.get("a", out));
+  const uint32_t original_id = out.command_id;
+  CHECK(original_id == 1);
+  const uint32_t next_before = store.next_command_id();
+
+  // Relearning overwrites in place. The id is what a Home Assistant entity is built on, so it has
+  // to outlive the waveform it started with.
+  CHECK(store.put(make_command("a", 20)) == StoreResult::OK);
+  CHECK(store.count() == 2);
+  CHECK(store.get("a", out));
+  CHECK(out.command_id == original_id);
   CHECK(out.timings.size() == 20);
-
-  CHECK(store.remove("a") == StoreResult::OK);
-  CHECK(store.count() == 0);
-  CHECK(store.remove("a") == StoreResult::NOT_FOUND);
-
-  // The freed slot is reusable, and the stale payload record does not resurrect anything.
-  CHECK(store.put(make_command("b")) == StoreResult::OK);
-  CHECK(store.get("b", out));
-  CHECK(out.timings.size() == 65);
+  // An overwrite consumes no id.
+  CHECK(store.next_command_id() == next_before);
 
   CommandStore reloaded;
   reloaded.configure(&backend, 4, 256, 12288, 0);
-  CHECK(reloaded.begin().loaded == 1);
-  CHECK(!reloaded.has("a"));
-  CHECK(reloaded.has("b"));
+  CHECK(reloaded.begin().loaded == 2);
+  CHECK(reloaded.get("a", out));
+  CHECK(out.command_id == original_id);
+  CHECK(out.timings.size() == 20);
+}
+
+void test_deleted_ids_are_never_reused() {
+  std::printf("store: a deleted id never comes back\n");
+  FakeBackend backend;
+  CommandStore store;
+  store.configure(&backend, 4, 256, 12288, 0);
+  store.begin();
+
+  CHECK(store.put(make_command("a")) == StoreResult::OK);  // id 1
+  CHECK(store.put(make_command("b")) == StoreResult::OK);  // id 2
+  CHECK(store.remove_by_id(1) == StoreResult::OK);
+  CHECK(store.count() == 1);
+  CHECK(!store.has_id(1));
+  CHECK(store.remove_by_id(1) == StoreResult::NOT_FOUND);
+
+  // The slot is reusable; the id is not.
+  CHECK(store.put(make_command("c")) == StoreResult::OK);
+  Command out;
+  CHECK(store.get("c", out));
+  CHECK(out.command_id == 3);
+  CHECK(!store.has_id(1));
+
+  // Name-keyed delete resolves to the same command and behaves identically.
+  CHECK(store.remove("b") == StoreResult::OK);
+  CHECK(store.remove("b") == StoreResult::NOT_FOUND);
+  CHECK(store.put(make_command("d")) == StoreResult::OK);
+  CHECK(store.get("d", out));
+  CHECK(out.command_id == 4);
+
+  CommandStore reloaded;
+  reloaded.configure(&backend, 4, 256, 12288, 0);
+  reloaded.begin();
+  CHECK(reloaded.next_command_id() == 5);
+  CHECK(!reloaded.has_id(1));
+  CHECK(!reloaded.has_id(2));
+}
+
+void test_id_exhaustion_fails_rather_than_wraps() {
+  std::printf("store: id exhaustion refuses instead of wrapping\n");
+  FakeBackend backend;
+  CommandStore store;
+  store.configure(&backend, 4, 256, 12288, 0);
+  store.begin();
+
+  // Drive next_command_id to the last assignable value by restoring into that state, which is the
+  // only supported way to set it directly.
+  uint8_t bridge[BRIDGE_ID_BYTES];
+  std::memset(bridge, 0xAB, sizeof(bridge));
+  CHECK(store.restore_begin(bridge, COMMAND_ID_LAST) == StoreResult::OK);
+  CHECK(store.restore_commit() == StoreResult::OK);
+  CHECK(store.next_command_id() == COMMAND_ID_LAST);
+
+  CHECK(store.put(make_command("last")) == StoreResult::OK);
+  Command out;
+  CHECK(store.get("last", out));
+  CHECK(out.command_id == COMMAND_ID_LAST);
+  CHECK(store.next_command_id() == COMMAND_ID_LAST + 1);
+
+  // No more ids, and none are recycled from the exhausted space.
+  CHECK(store.put(make_command("one_too_many")) == StoreResult::ID_EXHAUSTED);
+  CHECK(store.count() == 1);
+  // Overwriting an existing command needs no new id, so it still works.
+  CHECK(store.put(make_command("last", 20)) == StoreResult::OK);
+  CHECK(store.get("last", out));
+  CHECK(out.command_id == COMMAND_ID_LAST);
+}
+
+void test_rename() {
+  std::printf("store: rename touches only the name\n");
+  FakeBackend backend;
+  CommandStore store;
+  store.configure(&backend, 4, 256, 12288, 0);
+  store.begin();
+  CHECK(store.put(make_command("old")) == StoreResult::OK);
+  CHECK(store.put(make_command("other")) == StoreResult::OK);
+
+  const unsigned writes_before = backend.writes;
+  CHECK(store.rename(1, "new") == StoreResult::OK);
+  // Index only; the waveform record is not rewritten, so a rename cannot damage it.
+  CHECK(backend.writes == writes_before + 2);  // index and header
+
+  Command out;
+  CHECK(store.get("new", out));
+  CHECK(out.command_id == 1);
+  CHECK(out.timings == reference_frame());
+  CHECK(!store.has("old"));
+
+  CHECK(store.rename(1, "other") == StoreResult::NAME_TAKEN);
+  CHECK(store.rename(1, "has space") == StoreResult::NAME_INVALID);
+  CHECK(store.rename(1, "") == StoreResult::NAME_EMPTY);
+  CHECK(store.rename(99, "orphan") == StoreResult::NOT_FOUND);
+  CHECK(store.has("new"));
+
+  // Renaming to the current name is a no-op and costs neither a write nor a revision.
+  const uint32_t revision_before = store.revision();
+  const unsigned writes_now = backend.writes;
+  CHECK(store.rename(1, "new") == StoreResult::OK);
+  CHECK(store.revision() == revision_before);
+  CHECK(backend.writes == writes_now);
+
+  CommandStore reloaded;
+  reloaded.configure(&backend, 4, 256, 12288, 0);
+  CHECK(reloaded.begin().loaded == 2);
+  CHECK(reloaded.get_by_id(1, out));
+  CHECK(out.name == "new");
+  CHECK(out.timings == reference_frame());
+}
+
+void test_clear_preserves_identity() {
+  std::printf("store: clear keeps bridge_id and next_command_id\n");
+  FakeBackend backend;
+  CommandStore store;
+  store.configure(&backend, 4, 256, 12288, 0);
+  store.begin();
+  CHECK(store.put(make_command("a")) == StoreResult::OK);
+  CHECK(store.put(make_command("b")) == StoreResult::OK);
+
+  const std::string bridge = store.bridge_id_hex();
+  const uint32_t next_id = store.next_command_id();
+  const uint32_t revision_before = store.revision();
+
+  CHECK(store.clear_all() == StoreResult::OK);
+  CHECK(store.count() == 0);
+  // Clearing the commands does not make this a different logical bridge, and the ids that were
+  // handed out stay spent.
+  CHECK(store.bridge_id_hex() == bridge);
+  CHECK(store.next_command_id() == next_id);
+  CHECK(store.revision() == revision_before + 1);
+
+  CHECK(store.put(make_command("c")) == StoreResult::OK);
+  Command out;
+  CHECK(store.get("c", out));
+  CHECK(out.command_id == next_id);
+
+  CommandStore reloaded;
+  reloaded.configure(&backend, 4, 256, 12288, 0);
+  reloaded.begin();
+  CHECK(reloaded.bridge_id_hex() == bridge);
+  CHECK(reloaded.count() == 1);
+  CHECK(!reloaded.has_id(1));
+  CHECK(!reloaded.has_id(2));
+}
+
+void test_factory_reset() {
+  std::printf("store: factory reset is the way out of read-only\n");
+  FakeBackend backend;
+  CommandStore store;
+  store.configure(&backend, 8, 256, 12288, 0);
+  store.begin();
+  CHECK(store.put(make_command("a")) == StoreResult::OK);
+  CHECK(store.put(make_command("b")) == StoreResult::OK);
+  const std::string old_bridge = store.bridge_id_hex();
+
+  corrupt_header(backend);
+  CommandStore stuck;
+  stuck.configure(&backend, 8, 256, 12288, 0);
+  const LoadReport report = stuck.begin();
+  CHECK(report.read_only);
+  CHECK(stuck.put(make_command("blocked")) == StoreResult::READ_ONLY);
+
+  // The one operation allowed while read-only, and the only way back to a usable device.
+  CHECK(stuck.factory_reset() == StoreResult::OK);
+  CHECK(!stuck.read_only());
+  CHECK(stuck.fault() == StoreFault::NONE);
+  CHECK(stuck.count() == 0);
+  // A factory reset is a new logical bridge, so the identity and the id counter start over.
+  CHECK(stuck.bridge_id_hex() != old_bridge);
+  CHECK(stuck.bridge_id_hex() != std::string(32, '0'));
+  CHECK(stuck.next_command_id() == COMMAND_ID_FIRST);
+  CHECK(stuck.put(make_command("fresh")) == StoreResult::OK);
+
+  CommandStore reloaded;
+  reloaded.configure(&backend, 8, 256, 12288, 0);
+  const LoadReport after = reloaded.begin();
+  CHECK(!after.read_only);
+  CHECK(after.loaded == 1);
+  CHECK(reloaded.bridge_id_hex() == stuck.bridge_id_hex());
+}
+
+void test_restore_flow() {
+  std::printf("store: restore adopts an external identity\n");
+  uint8_t bridge[BRIDGE_ID_BYTES];
+  for (size_t i = 0; i < sizeof(bridge); i++) {
+    bridge[i] = static_cast<uint8_t>(0x10 + i);
+  }
+
+  FakeBackend backend;
+  CommandStore store;
+  store.configure(&backend, 8, 256, 12288, 0);
+  store.begin();
+  const std::string minted = store.bridge_id_hex();
+
+  // A restore onto a populated registry is refused. This is the guard that keeps a stale Home
+  // Assistant backup from overwriting a live bridge.
+  CHECK(store.put(make_command("local")) == StoreResult::OK);
+  CHECK(store.restore_begin(bridge, 7) == StoreResult::RESTORE_NOT_EMPTY);
+  CHECK(store.bridge_id_hex() == minted);
+
+  // Importing outside a restore is refused too, so an id can never be written that
+  // next_command_id knows nothing about.
+  Command stray = make_command("stray");
+  stray.command_id = 3;
+  CHECK(store.import_command(stray) == StoreResult::RESTORE_NOT_ACTIVE);
+
+  CHECK(store.clear_all() == StoreResult::OK);
+  CHECK(store.restore_begin(bridge, 7) == StoreResult::OK);
+  CHECK(store.bridge_id_hex() == "101112131415161718191a1b1c1d1e1f");
+  CHECK(store.next_command_id() == 7);
+  CHECK(store.restore_incomplete());
+
+  Command first = make_command("vel_1");
+  first.command_id = 2;
+  CHECK(store.import_command(first) == StoreResult::OK);
+
+  Command second = make_command("vel_6", 40);
+  second.command_id = 6;
+  CHECK(store.import_command(second) == StoreResult::OK);
+
+  // Rejections that keep the restored registry self-consistent.
+  Command duplicate_id = make_command("dup");
+  duplicate_id.command_id = 2;
+  CHECK(store.import_command(duplicate_id) == StoreResult::ID_CONFLICT);
+  Command future_id = make_command("future");
+  future_id.command_id = 7;
+  CHECK(store.import_command(future_id) == StoreResult::ID_CONFLICT);
+  Command zero_id = make_command("zero");
+  zero_id.command_id = COMMAND_ID_NONE;
+  CHECK(store.import_command(zero_id) == StoreResult::ID_CONFLICT);
+  Command duplicate_name = make_command("vel_1");
+  duplicate_name.command_id = 3;
+  CHECK(store.import_command(duplicate_name) == StoreResult::NAME_TAKEN);
+  CHECK(store.count() == 2);
+
+  CHECK(store.restore_commit() == StoreResult::OK);
+  CHECK(!store.restore_incomplete());
+  CHECK(store.restore_commit() == StoreResult::RESTORE_NOT_ACTIVE);
+
+  CommandStore reloaded;
+  reloaded.configure(&backend, 8, 256, 12288, 0);
+  const LoadReport report = reloaded.begin();
+  CHECK(!report.restore_incomplete);
+  CHECK(report.loaded == 2);
+  CHECK(reloaded.bridge_id_hex() == "101112131415161718191a1b1c1d1e1f");
+  CHECK(reloaded.next_command_id() == 7);
+  Command out;
+  CHECK(reloaded.get_by_id(6, out));
+  CHECK(out.name == "vel_6");
+  CHECK(out.timings.size() == 40);
+  // Learning after a restore continues from the restored id counter.
+  CHECK(reloaded.put(make_command("fresh")) == StoreResult::OK);
+  CHECK(reloaded.get("fresh", out));
+  CHECK(out.command_id == 7);
+}
+
+void test_restore_in_progress_blocks_normal_mutations() {
+  std::printf("store: a half-restored registry accepts only restore work\n");
+  uint8_t bridge[BRIDGE_ID_BYTES];
+  std::memset(bridge, 0x5A, sizeof(bridge));
+
+  FakeBackend backend;
+  CommandStore store;
+  store.configure(&backend, 8, 256, 12288, 0);
+  store.begin();
+  CHECK(store.restore_begin(bridge, 5) == StoreResult::OK);
+
+  Command one = make_command("vel_1");
+  one.command_id = 1;
+  CHECK(store.import_command(one) == StoreResult::OK);
+
+  // Learning into, renaming inside or deleting from a registry that is only half restored would
+  // race the rest of the import.
+  CHECK(store.put(make_command("learned")) == StoreResult::RESTORE_IN_PROGRESS);
+  CHECK(store.rename(1, "renamed") == StoreResult::RESTORE_IN_PROGRESS);
+  CHECK(store.remove("vel_1") == StoreResult::RESTORE_IN_PROGRESS);
+  CHECK(store.remove_by_id(1) == StoreResult::RESTORE_IN_PROGRESS);
+  CHECK(store.count() == 1);
+
+  // Reads are never blocked: the bridge keeps replaying what it already has.
+  Command out;
+  CHECK(store.get_by_id(1, out));
+  CHECK(out.name == "vel_1");
+
+  CHECK(store.restore_commit() == StoreResult::OK);
+  CHECK(store.put(make_command("learned")) == StoreResult::OK);
+}
+
+void test_interrupted_restore_is_visible() {
+  std::printf("store: an interrupted restore is reported, not hidden\n");
+  uint8_t bridge[BRIDGE_ID_BYTES];
+  std::memset(bridge, 0x5A, sizeof(bridge));
+
+  FakeBackend backend;
+  {
+    CommandStore store;
+    store.configure(&backend, 8, 256, 12288, 0);
+    store.begin();
+    CHECK(store.restore_begin(bridge, 5) == StoreResult::OK);
+    Command one = make_command("vel_1");
+    one.command_id = 1;
+    CHECK(store.import_command(one) == StoreResult::OK);
+    // Power lost here, before restore_commit().
+  }
+
+  CommandStore reloaded;
+  reloaded.configure(&backend, 8, 256, 12288, 0);
+  const LoadReport report = reloaded.begin();
+  CHECK(report.restore_incomplete);
+  CHECK(reloaded.restore_incomplete());
+  CHECK(!reloaded.read_only());  // still a working bridge
+  CHECK(reloaded.count() == 1);
+  CHECK(reloaded.next_command_id() == 5);
+
+  // Replay is the recovery path, and clearing is how the abandoned attempt is dropped. The
+  // adopted identity is kept, so the retry restores into the same logical bridge.
+  CHECK(reloaded.clear_all() == StoreResult::OK);
+  CHECK(!reloaded.restore_incomplete());
+  CHECK(reloaded.bridge_id_hex() == "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a");
+  CHECK(reloaded.restore_begin(bridge, 5) == StoreResult::OK);
+  Command one = make_command("vel_1");
+  one.command_id = 1;
+  CHECK(reloaded.import_command(one) == StoreResult::OK);
+  CHECK(reloaded.restore_commit() == StoreResult::OK);
+  CHECK(!reloaded.restore_incomplete());
 }
 
 void test_store_full_and_budget() {
@@ -376,11 +809,12 @@ void test_store_full_and_budget() {
   // Overwriting an existing name still works when every slot is taken.
   CHECK(store.put(make_command("two", 30)) == StoreResult::OK);
 
-  // Budget: index alone is 10 + 2*40 + 2 = 92 bytes, so 200 leaves room for 27 pulses.
+  // Budget: the index alone is 10 + 28 + 2*44 + 2 = 128 bytes, so 220 leaves room for 23 pulses.
   FakeBackend tight_backend;
   CommandStore tight;
-  tight.configure(&tight_backend, 2, 256, 200, 0);
+  tight.configure(&tight_backend, 2, 256, 220, 0);
   tight.begin();
+  CHECK(overhead(2) == 128);
   CHECK(tight.put(make_command("big")) == StoreResult::BUDGET_EXCEEDED);
   CHECK(tight.count() == 0);
   CHECK(tight.put(make_command("small", 20)) == StoreResult::OK);
@@ -402,36 +836,169 @@ void test_store_rejects_bad_names() {
   CHECK(store.put(make_command("")) == StoreResult::NAME_EMPTY);
   CHECK(store.put(make_command("has space")) == StoreResult::NAME_INVALID);
   CHECK(store.count() == 0);
+  // A rejected name consumes no id.
+  CHECK(store.next_command_id() == COMMAND_ID_FIRST);
 }
 
-void test_corruption_is_survivable() {
-  std::printf("store: corruption fails safely\n");
+void test_corrupt_payload_is_read_only() {
+  std::printf("store: an unreadable waveform makes the session read-only\n");
   FakeBackend backend;
   {
     CommandStore store;
     store.configure(&backend, 4, 256, 12288, 0);
     store.begin();
-    CHECK(store.put(make_command("good")) == StoreResult::OK);
-    CHECK(store.put(make_command("bad")) == StoreResult::OK);
+    CHECK(store.put(make_command("first", 65)) == StoreResult::OK);   // id 1, slot 0
+    CHECK(store.put(make_command("second", 40)) == StoreResult::OK);  // id 2, slot 1
+    CHECK(store.put(make_command("third", 30)) == StoreResult::OK);   // id 3, slot 2
   }
-
-  // Corrupt one payload record. Its slot must drop out; the other must survive.
+  // Damage the middle command's waveform only.
   for (auto &entry : backend.records) {
-    if (entry.second.size() == 65 * sizeof(int32_t)) {
+    if (entry.second.size() == 40 * sizeof(int32_t)) {
+      entry.second[7] ^= 0xFF;
+      break;
+    }
+  }
+  const std::map<uint32_t, std::vector<uint8_t>> untouched = backend.records;
+
+  CommandStore store;
+  store.configure(&backend, 4, 256, 12288, 0);
+  const LoadReport report = store.begin();
+
+  // A specific fault, naming the affected command.
+  CHECK(report.payload_faults == 1);
+  CHECK(report.fault == StoreFault::PAYLOAD_INVALID);
+  CHECK(report.fault_slot == 1);
+  CHECK(report.fault_name == "second");
+  CHECK(report.read_only);
+  CHECK(store.read_only());
+  CHECK(store.fault() == StoreFault::PAYLOAD_INVALID);
+
+  // Siblings still load, and stay readable and sendable.
+  CHECK(report.loaded == 2);
+  CHECK(store.count() == 2);
+  Command out;
+  CHECK(store.get_by_id(1, out));
+  CHECK(out.name == "first");
+  CHECK(out.timings == reference_frame());
+  CHECK(store.get_by_id(3, out));
+  CHECK(out.timings.size() == 30);
+  CHECK(!store.get_by_id(2, out));
+  const std::vector<CommandEntry> rows = store.entries();
+  CHECK(rows.size() == 2);
+
+  // Every normal mutation is refused, and none of them writes a byte.
+  const unsigned writes_before = backend.writes;
+  uint8_t bridge[BRIDGE_ID_BYTES];
+  std::memset(bridge, 0x33, sizeof(bridge));
+  Command imported = make_command("imported");
+  imported.command_id = 1;
+  CHECK(store.put(make_command("another")) == StoreResult::READ_ONLY);
+  CHECK(store.rename(1, "renamed") == StoreResult::READ_ONLY);
+  CHECK(store.remove("first") == StoreResult::READ_ONLY);
+  CHECK(store.remove_by_id(1) == StoreResult::READ_ONLY);
+  CHECK(store.clear_all() == StoreResult::READ_ONLY);
+  CHECK(store.restore_begin(bridge, 9) == StoreResult::READ_ONLY);
+  CHECK(store.import_command(imported) == StoreResult::READ_ONLY);
+  CHECK(store.restore_commit() == StoreResult::READ_ONLY);
+  CHECK(backend.writes == writes_before);
+  CHECK(backend.records == untouched);
+
+  // Rebooting does not quietly finish the job: the index still names the damaged command, so a
+  // repaired payload would come back.
+  CommandStore rebooted;
+  rebooted.configure(&backend, 4, 256, 12288, 0);
+  const LoadReport again = rebooted.begin();
+  CHECK(again.read_only);
+  CHECK(again.payload_faults == 1);
+  CHECK(again.loaded == 2);
+  CHECK(backend.records == untouched);
+
+  // Repairing the record is enough; nothing had to be relearned.
+  for (auto &entry : backend.records) {
+    if (entry.second.size() == 40 * sizeof(int32_t)) {
+      entry.second[7] ^= 0xFF;
+      break;
+    }
+  }
+  CommandStore repaired;
+  repaired.configure(&backend, 4, 256, 12288, 0);
+  const LoadReport healthy = repaired.begin();
+  CHECK(!healthy.read_only);
+  CHECK(healthy.payload_faults == 0);
+  CHECK(healthy.loaded == 3);
+  CHECK(repaired.get_by_id(2, out));
+  CHECK(out.name == "second");
+  CHECK(out.timings.size() == 40);
+}
+
+void test_corrupt_payload_recovers_via_factory_reset() {
+  std::printf("store: factory reset still escapes a payload fault\n");
+  FakeBackend backend;
+  {
+    CommandStore store;
+    store.configure(&backend, 4, 256, 12288, 0);
+    store.begin();
+    CHECK(store.put(make_command("keeper", 65)) == StoreResult::OK);
+    CHECK(store.put(make_command("broken", 40)) == StoreResult::OK);
+  }
+  for (auto &entry : backend.records) {
+    if (entry.second.size() == 40 * sizeof(int32_t)) {
       entry.second[0] ^= 0xFF;
       break;
     }
   }
+
   CommandStore store;
   store.configure(&backend, 4, 256, 12288, 0);
-  const LoadReport report = store.begin();
-  CHECK(report.dropped_corrupt == 1);
-  CHECK(report.loaded == 1);
-  CHECK(store.count() == 1);
+  CHECK(store.begin().fault == StoreFault::PAYLOAD_INVALID);
+  CHECK(store.read_only());
+
+  CHECK(store.factory_reset() == StoreResult::OK);
+  CHECK(!store.read_only());
+  CHECK(store.fault() == StoreFault::NONE);
+  CHECK(store.count() == 0);
+  CHECK(store.next_command_id() == COMMAND_ID_FIRST);
+  CHECK(store.revision() == REVISION_INITIAL);
+
+  CommandStore rebooted;
+  rebooted.configure(&backend, 4, 256, 12288, 0);
+  const LoadReport report = rebooted.begin();
+  CHECK(!report.read_only);
+  CHECK(report.payload_faults == 0);
+  CHECK(report.loaded == 0);
+  CHECK(rebooted.put(make_command("fresh")) == StoreResult::OK);
 }
 
-void test_header_corruption_and_version() {
-  std::printf("store: header CRC and version mismatch\n");
+void test_unfittable_slot_is_not_a_payload_fault() {
+  std::printf("store: a slot the config outgrew is reported separately\n");
+  FakeBackend backend;
+  {
+    CommandStore store;
+    store.configure(&backend, 4, 256, 12288, 0);
+    store.begin();
+    CHECK(store.put(make_command("long_one", 65)) == StoreResult::OK);
+    CHECK(store.put(make_command("short_one", 20)) == StoreResult::OK);
+  }
+  // max_pulses lowered below what the first command needs. The record is intact, so this is a
+  // configuration conflict rather than corruption.
+  CommandStore store;
+  store.configure(&backend, 4, 32, 12288, 0);
+  const LoadReport report = store.begin();
+  CHECK(report.dropped_unfittable == 1);
+  CHECK(report.payload_faults == 0);
+  CHECK(report.fault == StoreFault::NONE);
+  CHECK(report.loaded == 1);
+  CHECK(store.has("short_one"));
+
+  // Restoring the configuration brings it back.
+  CommandStore restored;
+  restored.configure(&backend, 4, 256, 12288, 0);
+  CHECK(restored.begin().loaded == 2);
+  CHECK(restored.has("long_one"));
+}
+
+void test_header_corruption_is_read_only() {
+  std::printf("store: a damaged header is refused, not overwritten\n");
   FakeBackend backend;
   {
     CommandStore store;
@@ -439,51 +1006,263 @@ void test_header_corruption_and_version() {
     store.begin();
     CHECK(store.put(make_command("x")) == StoreResult::OK);
   }
-  // Find the 10-byte header record and damage it.
-  std::vector<uint8_t> *header = nullptr;
-  for (auto &entry : backend.records) {
-    if (entry.second.size() == 10) {
-      header = &entry.second;
-    }
-  }
-  CHECK(header != nullptr);
-  if (header != nullptr) {
-    std::vector<uint8_t> saved = *header;
+  corrupt_header(backend);
+  const std::map<uint32_t, std::vector<uint8_t>> untouched = backend.records;
 
-    (*header)[0] ^= 0xFF;  // breaks both magic and CRC
-    {
-      CommandStore store;
-      store.configure(&backend, 4, 256, 12288, 0);
-      const LoadReport report = store.begin();
-      CHECK(report.had_stored_data);
-      CHECK(report.header_invalid);
-      CHECK(store.count() == 0);
-    }
+  CommandStore store;
+  store.configure(&backend, 4, 256, 12288, 0);
+  const LoadReport report = store.begin();
+  CHECK(report.had_stored_data);
+  CHECK(report.header_invalid);
+  CHECK(report.read_only);
+  CHECK(report.fault == StoreFault::HEADER_INVALID);
+  CHECK(store.count() == 0);
+  CHECK(backend.records == untouched);
+}
 
-    // A future format version must be refused rather than misread.
-    *header = saved;
-    (*header)[2] = STORE_FORMAT_VERSION + 1;
-    // Recompute the header CRC so the version check, not the CRC check, is what trips.
-    {
-      uint16_t crc = 0xFFFF;
-      for (size_t i = 0; i < 8; i++) {
-        crc ^= static_cast<uint16_t>((*header)[i]) << 8;
-        for (int bit = 0; bit < 8; bit++) {
-          crc = (crc & 0x8000u) != 0 ? static_cast<uint16_t>((crc << 1) ^ 0x1021u) : static_cast<uint16_t>(crc << 1);
-        }
-      }
-      (*header)[8] = static_cast<uint8_t>(crc & 0xFF);
-      (*header)[9] = static_cast<uint8_t>(crc >> 8);
-    }
+void test_future_format_is_refused() {
+  std::printf("store: an unsupported format version is refused, not read as empty\n");
+  FakeBackend backend;
+  {
     CommandStore store;
     store.configure(&backend, 4, 256, 12288, 0);
-    const LoadReport report = store.begin();
-    CHECK(report.version_mismatch);
-    CHECK(!report.header_invalid);
-    CHECK(store.count() == 0);
-    // Flash is left intact so a downgrade can still read it.
-    CHECK(backend.records.size() > 1);
+    store.begin();
+    CHECK(store.put(make_command("x")) == StoreResult::OK);
   }
+  std::vector<uint8_t> &header = backend.records[header_key_for(0)];
+  header[2] = STORE_FORMAT_VERSION + 1;
+  const uint16_t crc = fixture_crc16(header.data(), 8);
+  header[8] = static_cast<uint8_t>(crc & 0xFF);
+  header[9] = static_cast<uint8_t>(crc >> 8);
+  const std::map<uint32_t, std::vector<uint8_t>> untouched = backend.records;
+
+  CommandStore store;
+  store.configure(&backend, 4, 256, 12288, 0);
+  const LoadReport report = store.begin();
+  CHECK(report.version_mismatch);
+  CHECK(!report.header_invalid);
+  CHECK(report.read_only);
+  CHECK(report.fault == StoreFault::VERSION_UNSUPPORTED);
+  CHECK(store.count() == 0);
+  // Flash is left intact so another build can still read it.
+  CHECK(backend.records == untouched);
+}
+
+void test_foreign_index_length_is_refused() {
+  std::printf("store: a same-version record of the wrong shape is refused\n");
+  FakeBackend backend;
+  plant_foreign_layout(backend);
+  const std::map<uint32_t, std::vector<uint8_t>> untouched = backend.records;
+
+  CommandStore store;
+  store.configure(&backend, 16, 256, 12288, 0);
+  const LoadReport report = store.begin();
+  CHECK(report.had_stored_data);
+  CHECK(report.stored_format_version == STORE_FORMAT_VERSION);
+  CHECK(report.header_invalid);
+  CHECK(report.read_only);
+  CHECK(report.fault == StoreFault::HEADER_INVALID);
+  CHECK(store.count() == 0);
+  CHECK(backend.records == untouched);
+  CHECK(backend.writes == 0);
+}
+
+void test_factory_reset_is_the_only_escape_from_read_only() {
+  std::printf("store: factory reset is the only destructive exception to read-only\n");
+  FakeBackend backend;
+  plant_foreign_layout(backend);
+  const std::map<uint32_t, std::vector<uint8_t>> untouched = backend.records;
+
+  CommandStore store;
+  store.configure(&backend, 16, 256, 12288, 0);
+  CHECK(store.begin().read_only);
+  CHECK(store.read_only());
+
+  // Every normal mutation is refused, including the ones that would otherwise destroy data.
+  uint8_t bridge[BRIDGE_ID_BYTES];
+  std::memset(bridge, 0x77, sizeof(bridge));
+  Command imported = make_command("imported");
+  imported.command_id = 1;
+  CHECK(store.put(make_command("learned")) == StoreResult::READ_ONLY);
+  CHECK(store.rename(1, "renamed") == StoreResult::READ_ONLY);
+  CHECK(store.remove("anything") == StoreResult::READ_ONLY);
+  CHECK(store.remove_by_id(1) == StoreResult::READ_ONLY);
+  CHECK(store.clear_all() == StoreResult::READ_ONLY);
+  CHECK(store.restore_begin(bridge, 4) == StoreResult::READ_ONLY);
+  CHECK(store.import_command(imported) == StoreResult::READ_ONLY);
+  CHECK(store.restore_commit() == StoreResult::READ_ONLY);
+  CHECK(backend.records == untouched);
+  CHECK(backend.writes == 0);
+
+  // The single exception, and the only way to make the device usable again.
+  CHECK(store.factory_reset() == StoreResult::OK);
+  CHECK(!store.read_only());
+  CHECK(store.fault() == StoreFault::NONE);
+  CHECK(backend.records != untouched);
+
+  // Reboot: a healthy, empty, writable registry with no trace of the refused layout.
+  CommandStore rebooted;
+  rebooted.configure(&backend, 16, 256, 12288, 0);
+  const LoadReport report = rebooted.begin();
+  CHECK(report.had_stored_data);
+  CHECK(!report.read_only);
+  CHECK(!report.header_invalid);
+  CHECK(!report.version_mismatch);
+  CHECK(!report.restore_incomplete);
+  CHECK(report.fault == StoreFault::NONE);
+  CHECK(report.loaded == 0);
+  CHECK(report.payload_faults == 0 && report.dropped_unfittable == 0);
+  CHECK(rebooted.count() == 0);
+  CHECK(!rebooted.read_only());
+  CHECK(rebooted.put(make_command("first")) == StoreResult::OK);
+  Command out;
+  CHECK(rebooted.get("first", out));
+  CHECK(out.command_id == COMMAND_ID_FIRST);
+}
+
+void test_post_factory_reset_state() {
+  std::printf("store: the state a factory reset leaves behind\n");
+  FakeBackend backend;
+  CommandStore store;
+  store.configure(&backend, 8, 256, 12288, 0);
+  store.begin();
+
+  // Put the registry somewhere well away from its initial state first, so nothing below passes by
+  // coincidence: three ids spent, one deleted, an identity already minted.
+  CHECK(store.put(make_command("a")) == StoreResult::OK);
+  CHECK(store.put(make_command("b")) == StoreResult::OK);
+  CHECK(store.put(make_command("c")) == StoreResult::OK);
+  CHECK(store.remove_by_id(2) == StoreResult::OK);
+  const std::string old_bridge = store.bridge_id_hex();
+  CHECK(store.next_command_id() == 4);
+  CHECK(store.revision() > REVISION_INITIAL);
+
+  CHECK(store.factory_reset() == StoreResult::OK);
+
+  // The exact post-reset contract.
+  const std::string new_bridge = store.bridge_id_hex();
+  CHECK(new_bridge != old_bridge);              // a newly generated identity
+  CHECK(new_bridge != std::string(32, '0'));    // and a real one, not a failed mint
+  CHECK(new_bridge.size() == 32);
+  CHECK(store.next_command_id() == COMMAND_ID_FIRST);
+  CHECK(store.next_command_id() == 1);
+  CHECK(store.count() == 0);
+  CHECK(!store.restore_incomplete());           // restore_state == 0
+  CHECK(store.revision() == REVISION_INITIAL);
+  CHECK(!store.read_only());
+  CHECK(store.fault() == StoreFault::NONE);
+  CHECK(store.entries().empty());
+  CHECK(store.used_bytes() == overhead(8));
+
+  // Ids start over from 1: the previous generation's ids belonged to a different bridge, so
+  // reusing the numbers cannot collide with anything that survives.
+  CHECK(store.put(make_command("fresh")) == StoreResult::OK);
+  Command out;
+  CHECK(store.get("fresh", out));
+  CHECK(out.command_id == 1);
+  CHECK(store.revision() == REVISION_INITIAL + 1);
+
+  // Reboot: the new identity is on flash, not just in RAM.
+  CommandStore rebooted;
+  rebooted.configure(&backend, 8, 256, 12288, 0);
+  const LoadReport report = rebooted.begin();
+  CHECK(!report.read_only);
+  CHECK(report.loaded == 1);
+  CHECK(rebooted.bridge_id_hex() == new_bridge);
+  CHECK(rebooted.next_command_id() == 2);
+  CHECK(rebooted.revision() == REVISION_INITIAL + 1);
+  CHECK(!rebooted.restore_incomplete());
+}
+
+void test_fresh_device_matches_post_reset_state() {
+  std::printf("store: a first boot and a factory reset agree on the initial state\n");
+  // One semantic, reached two ways; a reader cannot tell them apart and should not have to.
+  FakeBackend fresh_backend;
+  CommandStore fresh;
+  fresh.configure(&fresh_backend, 8, 256, 12288, 0);
+  fresh.begin();
+
+  FakeBackend reset_backend;
+  CommandStore reset;
+  reset.configure(&reset_backend, 8, 256, 12288, 0);
+  reset.begin();
+  CHECK(reset.put(make_command("doomed")) == StoreResult::OK);
+  CHECK(reset.factory_reset() == StoreResult::OK);
+
+  CHECK(fresh.revision() == reset.revision());
+  CHECK(fresh.revision() == REVISION_INITIAL);
+  CHECK(fresh.next_command_id() == reset.next_command_id());
+  CHECK(fresh.count() == reset.count());
+  CHECK(fresh.restore_incomplete() == reset.restore_incomplete());
+  CHECK(fresh.read_only() == reset.read_only());
+  // Different bridges, though: an identity is never shared between two registries.
+  CHECK(fresh.bridge_id_hex() != reset.bridge_id_hex());
+}
+
+void test_read_only_refuses_every_mutation() {
+  std::printf("store: read-only mode refuses every write except factory reset\n");
+  FakeBackend backend;
+  {
+    CommandStore store;
+    store.configure(&backend, 8, 256, 12288, 0);
+    store.begin();
+    CHECK(store.put(make_command("vel_1")) == StoreResult::OK);
+  }
+  corrupt_header(backend);
+
+  CommandStore store;
+  store.configure(&backend, 8, 256, 12288, 0);
+  CHECK(store.begin().read_only);
+  CHECK(store.read_only());
+
+  const std::map<uint32_t, std::vector<uint8_t>> untouched = backend.records;
+  const unsigned writes_before = backend.writes;
+
+  CHECK(store.put(make_command("new")) == StoreResult::READ_ONLY);
+  CHECK(store.rename(1, "renamed") == StoreResult::READ_ONLY);
+  CHECK(store.remove("vel_1") == StoreResult::READ_ONLY);
+  CHECK(store.remove_by_id(1) == StoreResult::READ_ONLY);
+  CHECK(store.clear_all() == StoreResult::READ_ONLY);
+
+  uint8_t bridge[BRIDGE_ID_BYTES];
+  std::memset(bridge, 0x11, sizeof(bridge));
+  CHECK(store.restore_begin(bridge, 4) == StoreResult::READ_ONLY);
+  Command imported = make_command("imported");
+  imported.command_id = 1;
+  CHECK(store.import_command(imported) == StoreResult::READ_ONLY);
+  CHECK(store.restore_commit() == StoreResult::READ_ONLY);
+
+  // Not one byte moved.
+  CHECK(backend.writes == writes_before);
+  CHECK(backend.records == untouched);
+}
+
+void test_index_corruption_is_read_only() {
+  std::printf("store: an unreadable index is refused, not overwritten\n");
+  FakeBackend backend;
+  {
+    CommandStore store;
+    store.configure(&backend, 16, 256, 12288, 0);
+    store.begin();
+    CHECK(store.put(make_command("vel_1")) == StoreResult::OK);
+  }
+  // The index is the only record of its exact length.
+  for (auto &entry : backend.records) {
+    if (entry.second.size() == 734) {
+      entry.second[40] ^= 0xFF;
+      break;
+    }
+  }
+  const std::map<uint32_t, std::vector<uint8_t>> untouched = backend.records;
+
+  CommandStore store;
+  store.configure(&backend, 16, 256, 12288, 0);
+  const LoadReport report = store.begin();
+  CHECK(report.read_only);
+  CHECK(report.fault == StoreFault::INDEX_INVALID);
+  CHECK(store.count() == 0);
+  CHECK(backend.records == untouched);
+  CHECK(store.put(make_command("anything")) == StoreResult::READ_ONLY);
 }
 
 void test_failed_write_does_not_corrupt() {
@@ -493,18 +1272,43 @@ void test_failed_write_does_not_corrupt() {
   store.configure(&backend, 4, 256, 12288, 0);
   store.begin();
   CHECK(store.put(make_command("keep")) == StoreResult::OK);
+  const uint32_t next_id = store.next_command_id();
+  const uint32_t revision = store.revision();
 
   backend.fail_next_save = true;
   CHECK(store.put(make_command("new_one")) == StoreResult::STORAGE_ERROR);
   CHECK(store.count() == 1);
   CHECK(store.has("keep"));
   CHECK(!store.has("new_one"));
+  // A write that never landed must not spend an id or advance the revision.
+  CHECK(store.next_command_id() == next_id);
+  CHECK(store.revision() == revision);
+
+  // A failed rename must not leave the new name in RAM either.
+  backend.fail_next_save = true;
+  CHECK(store.rename(1, "other_name") == StoreResult::STORAGE_ERROR);
+  CHECK(store.has("keep"));
+  CHECK(!store.has("other_name"));
+  CHECK(store.revision() == revision);
+
+  // Nor a failed delete.
+  backend.fail_next_save = true;
+  CHECK(store.remove_by_id(1) == StoreResult::STORAGE_ERROR);
+  CHECK(store.count() == 1);
+  CHECK(store.has("keep"));
+
+  // Nor a failed clear.
+  backend.fail_next_save = true;
+  CHECK(store.clear_all() == StoreResult::STORAGE_ERROR);
+  CHECK(store.count() == 1);
+  CHECK(store.revision() == revision);
 
   // And the earlier command still reloads.
   CommandStore reloaded;
   reloaded.configure(&backend, 4, 256, 12288, 0);
   CHECK(reloaded.begin().loaded == 1);
   CHECK(reloaded.has("keep"));
+  CHECK(reloaded.next_command_id() == next_id);
 }
 
 void test_slot_count_change() {
@@ -541,6 +1345,8 @@ void test_key_salt_isolates_instances() {
   CHECK(!report.had_stored_data);
   CHECK(second.count() == 0);
   CHECK(second.put(make_command("only_in_second")) == StoreResult::OK);
+  // Separate registries mean separate logical bridges.
+  CHECK(second.bridge_id_hex() != first.bridge_id_hex());
 
   // Neither instance can see or clobber the other.
   CommandStore first_again;
@@ -548,6 +1354,7 @@ void test_key_salt_isolates_instances() {
   CHECK(first_again.begin().loaded == 1);
   CHECK(first_again.has("only_in_first"));
   CHECK(!first_again.has("only_in_second"));
+  CHECK(first_again.bridge_id_hex() == first.bridge_id_hex());
 }
 
 void test_used_bytes() {
@@ -557,7 +1364,7 @@ void test_used_bytes() {
   store.configure(&backend, 16, 256, 12288, 0);
   store.begin();
   const uint32_t empty_bytes = store.used_bytes();
-  CHECK(empty_bytes == 10 + 16 * 40 + 2);
+  CHECK(empty_bytes == overhead(16));
   CHECK(store.put(make_command("a")) == StoreResult::OK);
   CHECK(store.used_bytes() == empty_bytes + 65 * 4);
   CHECK(store.remove("a") == StoreResult::OK);
@@ -575,12 +1382,31 @@ int main() {
   test_split_frames();
   test_estimate_gap();
   test_name_validation();
+
+  test_layout_constants();
   test_store_roundtrip();
-  test_store_overwrite_and_delete();
+  test_relearn_preserves_command_id();
+  test_deleted_ids_are_never_reused();
+  test_id_exhaustion_fails_rather_than_wraps();
+  test_rename();
+  test_clear_preserves_identity();
+  test_factory_reset();
+  test_restore_flow();
+  test_restore_in_progress_blocks_normal_mutations();
+  test_interrupted_restore_is_visible();
   test_store_full_and_budget();
   test_store_rejects_bad_names();
-  test_corruption_is_survivable();
-  test_header_corruption_and_version();
+  test_corrupt_payload_is_read_only();
+  test_corrupt_payload_recovers_via_factory_reset();
+  test_unfittable_slot_is_not_a_payload_fault();
+  test_header_corruption_is_read_only();
+  test_future_format_is_refused();
+  test_foreign_index_length_is_refused();
+  test_factory_reset_is_the_only_escape_from_read_only();
+  test_post_factory_reset_state();
+  test_fresh_device_matches_post_reset_state();
+  test_read_only_refuses_every_mutation();
+  test_index_corruption_is_read_only();
   test_failed_write_does_not_corrupt();
   test_slot_count_change();
   test_key_salt_isolates_instances();

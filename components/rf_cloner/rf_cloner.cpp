@@ -55,6 +55,8 @@ const char *learn_failure_to_string(LearnFailure failure) {
   return "unknown";
 }
 
+bool store_random_bytes(uint8_t *out, size_t len) { return esphome::random_bytes(out, len); }
+
 namespace {
 
 /// CommandStore backed by ESPHome preferences.
@@ -101,22 +103,36 @@ void RfCloner::setup() {
 
   const LoadReport report = this->store_.begin();
   if (!report.had_stored_data) {
-    ESP_LOGI(TAG, "No stored commands yet (first boot)");
-  } else if (report.version_mismatch) {
+    ESP_LOGI(TAG, "No stored commands yet (first boot); bridge id %s", this->store_.bridge_id_hex().c_str());
+  } else if (report.fault == StoreFault::PAYLOAD_INVALID) {
     ESP_LOGE(TAG,
-             "Stored data uses format version %u, this firmware speaks version %u. Refusing to "
-             "interpret it; starting empty and leaving flash untouched",
-             report.stored_format_version, STORE_FORMAT_VERSION);
-  } else if (report.header_invalid) {
-    ESP_LOGE(TAG, "Stored command index is unreadable or failed its CRC; starting empty, flash left untouched");
+             "%u stored command(s) have an unreadable waveform, starting with '%s' in slot %u. The "
+             "other %u loaded normally and can still be sent; every mutation is refused this "
+             "session so nothing rewrites the index over them. Call rf_cloner.factory_reset to "
+             "discard the registry and start clean",
+             report.payload_faults, report.fault_name.c_str(), report.fault_slot, report.loaded);
+  } else if (report.read_only) {
+    ESP_LOGE(TAG,
+             "Stored data is not readable by this firmware (%s, stored format version %u). Flash "
+             "was left exactly as found and every mutation is refused this session. Call "
+             "rf_cloner.factory_reset to discard it and start clean",
+             store_fault_to_string(report.fault), report.stored_format_version);
   } else {
-    ESP_LOGI(TAG, "Loaded %u stored command(s)", report.loaded);
+    ESP_LOGI(TAG, "Loaded %u stored command(s); bridge id %s, revision %" PRIu32, report.loaded,
+             this->store_.bridge_id_hex().c_str(), this->store_.revision());
+    if (report.restore_incomplete) {
+      ESP_LOGW(TAG,
+               "A restore was interrupted before it completed. Replay it from Home Assistant, or "
+               "clear the registry to abandon it; learning is refused until then");
+    }
     if (report.slot_count_changed) {
       ESP_LOGW(TAG, "max_commands changed (stored %u, configured %u)", report.stored_slot_count, this->max_commands_);
     }
-    if (report.dropped_corrupt > 0) {
-      ESP_LOGW(TAG, "Dropped %u unreadable command(s) from the in-RAM view; flash left untouched",
-               report.dropped_corrupt);
+    if (report.dropped_unfittable > 0) {
+      ESP_LOGW(TAG,
+               "%u stored command(s) no longer fit max_commands/max_pulses and were left out of "
+               "the in-RAM view; their records stay on flash until the next write",
+               report.dropped_unfittable);
     }
   }
 
@@ -467,7 +483,42 @@ bool RfCloner::send(const std::string &name, uint16_t repeat_override, uint32_t 
     this->publish_state_();
     return false;
   }
+  return this->transmit_(command, repeat_override, gap_override);
+}
 
+bool RfCloner::send_by_id(uint32_t command_id, uint16_t repeat_override, uint32_t gap_override) {
+  if (this->transmitter_ == nullptr) {
+    ESP_LOGE(TAG, "Cannot send command %" PRIu32 ": no transmitter configured", command_id);
+    return false;
+  }
+
+  Command command;
+  if (!this->store_.get_by_id(command_id, command)) {
+    ESP_LOGW(TAG, "Cannot send: no command with id %" PRIu32, command_id);
+    this->last_result_ = "not_found:#" + std::to_string(command_id);
+    this->publish_state_();
+    return false;
+  }
+  return this->transmit_(command, repeat_override, gap_override);
+}
+
+bool RfCloner::rename(uint32_t command_id, const std::string &new_name) {
+  const StoreResult result = this->store_.rename(command_id, new_name);
+  if (result != StoreResult::OK) {
+    ESP_LOGW(TAG, "Cannot rename command %" PRIu32 " to '%s': %s", command_id, new_name.c_str(),
+             store_result_to_string(result));
+    this->last_result_ = std::string("rename_failed:") + store_result_to_string(result);
+    this->publish_state_();
+    return false;
+  }
+  ESP_LOGI(TAG, "Renamed command %" PRIu32 " to '%s'", command_id, new_name.c_str());
+  this->last_result_ = "renamed:" + new_name;
+  this->publish_state_();
+  return true;
+}
+
+bool RfCloner::transmit_(const Command &command, uint16_t repeat_override, uint32_t gap_override) {
+  const std::string &name = command.name;
   const uint16_t repeats = repeat_override > 0 ? repeat_override : command.repeat_times;
   const uint32_t gap_us = gap_override > 0 ? gap_override : command.gap_us;
 
@@ -480,7 +531,7 @@ bool RfCloner::send(const std::string &name, uint16_t repeat_override, uint32_t 
   call.set_send_wait(gap_us);  // microseconds, despite the stale "ms" label in remote_base's log
   call.perform();
 
-  ESP_LOGI(TAG, "Sent '%s': %u pulses x%u, gap %" PRIu32 " us", name.c_str(),
+  ESP_LOGI(TAG, "Sent '%s' (#%" PRIu32 "): %u pulses x%u, gap %" PRIu32 " us", name.c_str(), command.command_id,
            static_cast<unsigned>(command.timings.size()), repeats, gap_us);
   this->send_callback_.call(name);
   return true;
@@ -505,12 +556,29 @@ void RfCloner::clear_all() {
   const StoreResult result = this->store_.clear_all();
   if (result != StoreResult::OK) {
     ESP_LOGE(TAG, "Could not clear the store: %s", store_result_to_string(result));
+    this->last_result_ = std::string("clear_failed:") + store_result_to_string(result);
+    this->publish_state_();
     return;
   }
   ESP_LOGI(TAG, "Cleared all stored commands");
   this->last_result_ = "cleared";
   this->publish_state_();
   this->publish_store_stats_();
+}
+
+bool RfCloner::factory_reset() {
+  const StoreResult result = this->store_.factory_reset();
+  if (result != StoreResult::OK) {
+    ESP_LOGE(TAG, "Factory reset failed: %s", store_result_to_string(result));
+    this->last_result_ = std::string("factory_reset_failed:") + store_result_to_string(result);
+    this->publish_state_();
+    return false;
+  }
+  ESP_LOGW(TAG, "Factory reset: registry discarded, new bridge id %s", this->store_.bridge_id_hex().c_str());
+  this->last_result_ = "factory_reset";
+  this->publish_state_();
+  this->publish_store_stats_();
+  return true;
 }
 
 }  // namespace esphome::rf_cloner

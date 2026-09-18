@@ -89,9 +89,9 @@ If neither path yields a plausible value, `default_gap` is used.
 One `CommandStore` per component instance, backed by ESPHome preferences (NVS on ESP32).
 
 ```
-header  (10 bytes, fixed)    magic, format_version, slot_count, index_bytes, crc
-index   (slot_count*40 + 2)  one record per slot, then a crc over the array
-payload (pulse_count * 4)    one record per occupied slot, int32 timings
+header  (10 bytes, fixed)        magic, format_version, slot_count, index_bytes, crc
+index   (28 + slot_count*44 + 2) registry metadata, one record per slot, then a crc
+payload (pulse_count * 4)        one record per occupied slot, int32 timings
 ```
 
 Three record kinds because ESPHome's preference `load()` only succeeds on an exact length match:
@@ -99,17 +99,60 @@ the fixed-size header must be read first to learn the lengths of the index and o
 Padding every slot to `max_pulses` instead would cost about 1 kB each and exhaust the ~20 kB NVS
 budget long before the slot count did.
 
-Per command the store holds the name, the timings, `gap_us`, `repeat_times`, `frequency_hz` and
-the modulation. Nothing assumes a particular pulse count, bit count, repeat count or frequency.
+The header never changes size or layout across formats. It carries the format version and the
+exact length of the index, so a build always knows whether the rest is something it understands.
+
+Per command the store holds an id, the name, the timings, `gap_us`, `repeat_times`,
+`frequency_hz` and the modulation. Nothing assumes a particular pulse count, bit count, repeat
+count or frequency.
+
+### Identity
+
+The 28-byte metadata block at the head of the index holds:
+
+| Field | Meaning |
+| --- | --- |
+| `bridge_id` | 16 random bytes minted once, identifying the logical bridge rather than the board. Independent of MAC, IP and node name, so a replacement ESP32 can be restored into the same logical bridge. |
+| `next_command_id` | Monotonic `uint32`. Never rewound, so an id is never handed out twice. |
+| `revision` | Incremented once per committed mutation. Starts at 1; 0 never reaches flash. |
+| `restore_state` | 1 while a restore is in progress. |
+
+A command is identified by its `command_id`, which is immutable. The name is mutable metadata:
+renaming addresses the command by id and rewrites only the index, never the waveform. Relearning
+under an existing name overwrites that command in place and keeps its id, so anything built on the
+id survives. Deleting frees the slot but not the id, and `clear_all` keeps `bridge_id` and
+`next_command_id` — clearing the commands does not make this a different bridge.
+
+Identity and slots live in the same record because assigning an id and advancing
+`next_command_id` must commit together; a separate metadata record would leave a window where a
+crash could hand the same id out twice.
 
 **Failure behaviour**
 
-- A slot whose payload fails its CRC, or cannot be read, is dropped from the in-RAM view only.
-  Flash is left untouched until the next write.
-- An unrecognised `format_version` is refused rather than reinterpreted; the device starts empty
-  and the stored bytes survive for a downgrade.
-- A storage write that fails rolls back the in-RAM state, so the two never diverge.
+Storage the firmware cannot interpret is never rewritten. Each of these leaves every persisted
+record exactly as found and makes the session read-only:
+
+| Fault | Cause |
+| --- | --- |
+| `header_invalid` | Bad magic or CRC, or an index length this format does not use. |
+| `index_invalid` | Index record missing or failed its CRC. |
+| `version_unsupported` | A `format_version` this build does not write. |
+| `payload_invalid` | An occupied slot's waveform is missing, the wrong length, or failed its CRC. |
+
+In read-only mode the commands that did load stay readable and sendable, and every mutation is
+refused — including `clear_all` — so nothing rewrites the index over data that may still be
+recoverable. `factory_reset` is the single exception: it discards the registry, mints a new
+`bridge_id` and writes a clean empty one. It is the only way out, and it is always explicit.
+
+A slot the current `max_commands` or `max_pulses` can no longer hold is reported separately and is
+not a fault: the record is intact and restoring the previous configuration brings it back.
+
+Other guarantees:
+
+- A storage write that fails rolls back the in-RAM state, including `revision` and
+  `next_command_id`, so the two never diverge.
 - `max_storage_bytes` is enforced before writing, not discovered by a failed write.
+- During a restore, only restore operations and an explicit clear are accepted.
 
 Instances on one device share a single NVS namespace, so each salts its preference keys with a
 hash of its YAML id.
@@ -142,8 +185,9 @@ entity holding a command name, plus `button` entities for learn, send, delete an
 any command by name. Those render automatically both on the Home Assistant device page and in
 ESPHome's built-in `web_server`, so no custom frontend exists or is needed.
 
-`api: actions:` provides the same operations for automations, including a JSON `rf_list` via
-`supports_response: only`.
+`api: actions:` provides the same operations for automations, plus the id-addressed ones the
+static controls cannot express. `rf_status` is the canonical structured read: it returns the
+registry identity, counters and one object per command via `supports_response: only`.
 
 A `select` listing stored names is deliberately not used: ESPHome sends a select's option list
 only in `ListEntities`, so it would be correct at boot and stale thereafter.

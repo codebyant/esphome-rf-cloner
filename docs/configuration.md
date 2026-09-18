@@ -32,8 +32,9 @@ front-end does its own modulation and an IR carrier would corrupt the waveform.
 | `max_pulses` | `128` | Longest waveform that may be stored, in pulses |
 | `max_storage_bytes` | `12288` | Hard budget. `put` refuses with `budget_exceeded` before this is crossed |
 
-Bytes used are `10 + max_commands * 40 + 2` for the index, plus `4 * pulse_count` per stored
-command. A 65-pulse command costs 260 bytes. Raising `max_pulses` much past the default makes
+Bytes used are `10 + 28 + max_commands * 44 + 2` for the header and index — 744 bytes at the
+default `max_commands: 16` — plus `4 * pulse_count` per stored command. A 65-pulse command costs
+260 bytes. Raising `max_pulses` much past the default makes
 `max_commands * max_pulses * 4` exceed `max_storage_bytes`; that is legal (the byte budget is the
 real cap, and `put` refuses with `budget_exceeded` before it is crossed) but it logs a notice at
 build time so the ceiling is not a surprise. The practical ceiling is ESPHome's NVS partition,
@@ -141,33 +142,60 @@ cancel, and the `text_sensor` and `sensor` diagnostics.
 
 ### `packages/api-actions.yaml`
 
-Defines `rf_learn`, `rf_send`, `rf_delete`, `rf_cancel` and `rf_list`, callable from Home
-Assistant as `esphome.<node>_rf_learn` and so on. Merges with an existing `api:` block, so a
-device's own actions are kept.
+Defines the actions below, callable from Home Assistant as `esphome.<node>_rf_learn` and so on.
+Merges with an existing `api:` block, so a device's own actions are kept.
+
+| Action | Arguments | Purpose |
+|---|---|---|
+| `rf_status` | — | Canonical structured read: identity, counters, one object per command |
+| `rf_learn` | `name` | Arm learning under a name |
+| `rf_cancel` | — | Abort an armed learn |
+| `rf_send` | `name` | Replay by name |
+| `rf_send_id` | `command_id` | Replay by immutable id, unaffected by a rename |
+| `rf_rename` | `command_id`, `name` | Rename; keeps the id and the waveform |
+| `rf_delete` | `name` | Delete by name; the id is not recycled |
+| `rf_clear` | — | Drop every command, keeping `bridge_id` and `next_command_id` |
+| `rf_factory_reset` | — | Discard the registry and its identity; the only escape from read-only |
+| `rf_list` | — | Older name-only read, superseded by `rf_status` |
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `rf_cloner_id` | `cloner` | The component these actions drive |
 | `rf_action_prefix` | `rf_` | Prepended to every action name |
 
-`rf_list` uses `supports_response: only` and returns JSON:
+`rf_status` is the canonical read. It uses `supports_response: only` and returns the registry
+identity, its counters and one object per command:
 
 ```yaml
-action: esphome.rf_bridge_rf_list
+action: esphome.rf_bridge_rf_status
 response_variable: rf
 ```
 
 ```json
 {
-  "commands": ["porch_light", "gate_open"],
+  "bridge_id": "b7397c870440b9228377fbdb4ed95624",
+  "revision": 5,
+  "next_command_id": 3,
+  "restore_incomplete": false,
+  "read_only": false,
+  "fault": "none",
+  "state": "idle",
+  "last_result": "porch_light",
   "count": 2,
   "max_commands": 16,
+  "max_pulses": 128,
   "used_bytes": 1172,
   "capacity_bytes": 12288,
-  "state": "idle",
-  "last_result": "porch_light"
+  "commands": [
+    {"id": 1, "name": "porch_light", "pulses": 65},
+    {"id": 3, "name": "gate_open", "pulses": 50}
+  ]
 }
 ```
+
+`read_only` and `fault` report storage the firmware refuses to interpret; see
+[Failure behaviour](#failure-behaviour). `rf_list` remains as the older name-only read, returning
+`commands` as a plain array of names with no ids or identity; prefer `rf_status`.
 
 ### Two instances on one device
 
@@ -244,10 +272,15 @@ reference configuration.
 ## Failure behaviour
 
 - A failed or noisy learn writes nothing. Existing commands cannot be damaged by it.
-- A slot whose payload fails its CRC, or whose record cannot be read, is dropped from the in-RAM
-  view and logged. Flash is left untouched until the user changes something.
-- An unknown `format_version` on flash is refused rather than reinterpreted; the device starts
-  empty and the stored bytes survive for a downgrade.
+- Storage the firmware cannot interpret is never rewritten. A bad header or index, an unknown
+  `format_version`, or an occupied command whose waveform is missing or fails its CRC all leave
+  every record exactly as found and make the session **read-only**: whatever loaded stays
+  readable and sendable, and every mutation is refused. `rf_status` reports this as `read_only`
+  with a `fault` of `header_invalid`, `index_invalid`, `version_unsupported` or `payload_invalid`.
+- `rf_factory_reset` is the only way out of read-only mode. It discards the registry, mints a new
+  `bridge_id` and writes a clean empty one, touching only this component's own records.
+- A slot the current `max_commands` or `max_pulses` can no longer hold is logged but is not a
+  fault; the record is intact and restoring the previous configuration brings it back.
 - A storage write that fails rolls back the in-RAM state too, so the two never diverge.
 
 Covered by the host tests in [`tests/`](../tests); run `sh tests/run.sh`.

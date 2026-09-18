@@ -72,12 +72,39 @@ longest space *inside* a frame, keeping it below the gap *between* frames.
 
 The boot log reports what was found:
 
-- `No stored commands yet (first boot)` — nothing was ever written.
-- `Dropped N unreadable command(s)` — records failed their CRC. Relearn them.
-- `Stored data uses format version N` — the firmware and the stored data disagree. Flash is left
-  intact; the commands are unreadable by this build.
-- `max_commands changed (stored N, configured M)` — reducing `max_commands` drops commands in the
-  removed slots from the in-RAM view.
+- `No stored commands yet (first boot); bridge id X` — nothing was ever written, so a fresh
+  identity was minted and persisted.
+- `Loaded N stored command(s); bridge id X, revision R` — a healthy registry.
+- `N stored command(s) have an unreadable waveform` — the index still names them, so the session
+  is read-only and nothing rewrites over them. See below.
+- `Stored data is not readable by this firmware` — a bad header or index, or a `format_version`
+  this build does not write. Flash is left intact and the session is read-only.
+- `A restore was interrupted before it completed` — replay the restore, or clear to abandon it.
+- `max_commands changed (stored N, configured M)` — reducing `max_commands` or `max_pulses` leaves
+  commands that no longer fit out of the in-RAM view. Their records are intact; restoring the
+  previous values brings them back.
+
+### The device booted read-only
+
+Any storage this firmware refuses to interpret puts the session into read-only mode. Commands that
+loaded stay readable and sendable, and every mutation — including `rf_clear` — is refused, so
+nothing overwrites data that may still be recoverable. `rf_status` reports it:
+
+```json
+{"read_only": true, "fault": "payload_invalid"}
+```
+
+| `fault` | Meaning |
+|---|---|
+| `header_invalid` | Bad magic or CRC, or an index length this format does not use |
+| `index_invalid` | Index record missing or failed its CRC |
+| `version_unsupported` | A `format_version` this build does not write |
+| `payload_invalid` | An occupied command's waveform is missing, the wrong length, or failed its CRC |
+
+Recovery is deliberate and destructive: `rf_factory_reset` discards the registry, mints a new
+`bridge_id` and writes a clean empty one. It touches only this component's own records, so other
+ESPHome state is unaffected. There is no partial-salvage path — everything still stored is lost,
+so export anything you can send first.
 
 If learning reports success but nothing survives, check for `Writing N items` in the log after a
 learn — its absence means the preference write never happened.

@@ -49,7 +49,73 @@ api:
       then:
         - rf_cloner.cancel: ${rf_cloner_id}
 
-    # Returns the stored commands and storage usage as JSON, for a response_variable.
+    # Drops every command but keeps the logical identity: the bridge_id and the id counter are
+    # preserved, so a cleared bridge is still the same bridge and no id is ever handed out twice.
+    - action: ${rf_action_prefix}clear
+      then:
+        - rf_cloner.clear_all: ${rf_cloner_id}
+
+    # Discards the stored registry, including its bridge identity, and writes a fresh empty one.
+    # Touches only this component's own preference records, never unrelated ESPHome state. This is
+    # also the only mutation accepted when the device booted with storage it refuses to interpret.
+    - action: ${rf_action_prefix}factory_reset
+      then:
+        - rf_cloner.factory_reset: ${rf_cloner_id}
+
+    - action: ${rf_action_prefix}send_id
+      variables:
+        command_id: int
+      then:
+        - rf_cloner.send_id:
+            id: ${rf_cloner_id}
+            command_id: !lambda "return command_id;"
+
+    # Names are mutable metadata, so a rename addresses the command by its immutable id and
+    # leaves the waveform and that id untouched.
+    - action: ${rf_action_prefix}rename
+      variables:
+        command_id: int
+        name: string
+      then:
+        - rf_cloner.rename:
+            id: ${rf_cloner_id}
+            command_id: !lambda "return command_id;"
+            name: !lambda "return name;"
+
+    # Canonical read-only view of the registry, for a response_variable. Reports identity,
+    # counters and one object per command; deliberately carries no waveforms, so it stays cheap
+    # enough to poll and never doubles as a backup payload.
+    - action: ${rf_action_prefix}status
+      supports_response: only
+      then:
+        - api.respond:
+            data: !lambda |-
+              const auto &registry = id(${rf_cloner_id}).store();
+              root["bridge_id"] = registry.bridge_id_hex();
+              root["revision"] = registry.revision();
+              root["next_command_id"] = registry.next_command_id();
+              root["restore_incomplete"] = registry.restore_incomplete();
+              // Set when the device booted on storage it refuses to interpret; every mutation is
+              // refused until rf_factory_reset.
+              root["read_only"] = registry.read_only();
+              root["fault"] = esphome::rf_cloner::store_fault_to_string(registry.fault());
+              root["state"] = esphome::rf_cloner::learn_state_to_string(id(${rf_cloner_id}).state());
+              root["last_result"] = id(${rf_cloner_id}).last_result();
+              root["count"] = registry.count();
+              root["max_commands"] = registry.max_commands();
+              // Explains a too_many_pulses rejection without a second round trip.
+              root["max_pulses"] = registry.max_pulses();
+              root["used_bytes"] = registry.used_bytes();
+              root["capacity_bytes"] = registry.capacity_bytes();
+              JsonArray commands = root["commands"].to<JsonArray>();
+              for (const auto &entry : registry.entries()) {
+                JsonObject item = commands.add<JsonObject>();
+                item["id"] = entry.command_id;
+                item["name"] = entry.name;
+                item["pulses"] = entry.pulse_count;
+              }
+
+    # Superseded by rf_status; kept for existing standalone scripts.
     - action: ${rf_action_prefix}list
       supports_response: only
       then:

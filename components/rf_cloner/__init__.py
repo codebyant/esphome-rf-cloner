@@ -37,11 +37,20 @@ CancelAction = rf_cloner_ns.class_(
     "CancelAction", automation.Action, cg.Parented.template(RfCloner)
 )
 SendAction = rf_cloner_ns.class_("SendAction", automation.Action, cg.Parented.template(RfCloner))
+SendByIdAction = rf_cloner_ns.class_(
+    "SendByIdAction", automation.Action, cg.Parented.template(RfCloner)
+)
+RenameAction = rf_cloner_ns.class_(
+    "RenameAction", automation.Action, cg.Parented.template(RfCloner)
+)
 DeleteAction = rf_cloner_ns.class_(
     "DeleteAction", automation.Action, cg.Parented.template(RfCloner)
 )
 ClearAllAction = rf_cloner_ns.class_(
     "ClearAllAction", automation.Action, cg.Parented.template(RfCloner)
+)
+FactoryResetAction = rf_cloner_ns.class_(
+    "FactoryResetAction", automation.Action, cg.Parented.template(RfCloner)
 )
 
 LearnStartedTrigger = rf_cloner_ns.class_("LearnStartedTrigger", automation.Trigger.template(cg.std_string))
@@ -64,6 +73,7 @@ CONF_DEFAULT_REPEAT_TIMES = "default_repeat_times"
 CONF_DEFAULT_GAP = "default_gap"
 CONF_MIN_GAP = "min_gap"
 CONF_MAX_GAP = "max_gap"
+CONF_COMMAND_ID = "command_id"
 CONF_REPEAT_TIMES = "repeat_times"
 CONF_GAP = "gap"
 CONF_ON_LEARN_STARTED = "on_learn_started"
@@ -80,9 +90,19 @@ def _fnv1a_32(text: str) -> int:
     return value
 
 
+# Mirrors the on-flash sizes in command_store.cpp: StoredHeader, StoredMeta, StoredSlot and the
+# index CRC. CommandStore::index_overhead_bytes() is the authority; these must agree with it.
+_HEADER_BYTES = 10
+_META_BYTES = 28
+_SLOT_BYTES = 44
+_CRC_BYTES = 2
+
+
 def _validate_budget(config):
     """Warn loudly at validation time rather than at the first failed learn."""
-    index_bytes = 10 + config[CONF_MAX_COMMANDS] * 40 + 2
+    index_bytes = (
+        _HEADER_BYTES + _META_BYTES + config[CONF_MAX_COMMANDS] * _SLOT_BYTES + _CRC_BYTES
+    )
     worst_case = index_bytes + config[CONF_MAX_COMMANDS] * config[CONF_MAX_PULSES] * 4
     if index_bytes > config[CONF_MAX_STORAGE_BYTES]:
         raise cv.Invalid(
@@ -272,6 +292,51 @@ async def rf_cloner_send_to_code(config, action_id, template_arg, args):
     return var
 
 
+ID_ACTION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(RfCloner),
+        # Command ids are uint32 and never reused; 0 is reserved for an empty slot.
+        cv.Required(CONF_COMMAND_ID): cv.templatable(cv.int_range(min=1, max=4294967294)),
+    }
+)
+
+
+@automation.register_action(
+    "rf_cloner.send_id",
+    SendByIdAction,
+    ID_ACTION_SCHEMA.extend(
+        {
+            cv.Optional(CONF_REPEAT_TIMES): cv.templatable(cv.int_range(min=1, max=1000)),
+            cv.Optional(CONF_GAP): cv.templatable(cv.positive_time_period_microseconds),
+        }
+    ),
+    synchronous=True,
+)
+async def rf_cloner_send_id_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_command_id(await cg.templatable(config[CONF_COMMAND_ID], args, cg.uint32)))
+    if CONF_REPEAT_TIMES in config:
+        cg.add(var.set_repeat_times(await cg.templatable(config[CONF_REPEAT_TIMES], args, cg.uint16)))
+    if CONF_GAP in config:
+        cg.add(var.set_gap(await cg.templatable(config[CONF_GAP], args, cg.uint32)))
+    return var
+
+
+@automation.register_action(
+    "rf_cloner.rename",
+    RenameAction,
+    ID_ACTION_SCHEMA.extend({cv.Required(CONF_NAME): cv.templatable(cv.string_strict)}),
+    synchronous=True,
+)
+async def rf_cloner_rename_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_command_id(await cg.templatable(config[CONF_COMMAND_ID], args, cg.uint32)))
+    cg.add(var.set_name(await cg.templatable(config[CONF_NAME], args, cg.std_string)))
+    return var
+
+
 @automation.register_action(
     "rf_cloner.delete", DeleteAction, NAMED_ACTION_SCHEMA, synchronous=True
 )
@@ -291,6 +356,12 @@ async def rf_cloner_delete_to_code(config, action_id, template_arg, args):
 @automation.register_action(
     "rf_cloner.clear_all",
     ClearAllAction,
+    automation.maybe_simple_id(RF_CLONER_ACTION_SCHEMA),
+    synchronous=True,
+)
+@automation.register_action(
+    "rf_cloner.factory_reset",
+    FactoryResetAction,
     automation.maybe_simple_id(RF_CLONER_ACTION_SCHEMA),
     synchronous=True,
 )

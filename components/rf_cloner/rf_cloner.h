@@ -87,8 +87,16 @@ class RfCloner : public Component, public remote_base::RemoteReceiverListener {
   void learn(const std::string &name, uint32_t timeout_ms = 0);
   void cancel();
   bool send(const std::string &name, uint16_t repeat_override = 0, uint32_t gap_override = 0);
+  /// Replay by immutable id, so a caller that holds one is unaffected by a rename.
+  bool send_by_id(uint32_t command_id, uint16_t repeat_override = 0, uint32_t gap_override = 0);
+  /// Change a command's name, keeping its id and waveform.
+  bool rename(uint32_t command_id, const std::string &new_name);
   bool erase(const std::string &name);
   void clear_all();
+  /// Discard the stored registry, including its identity, and write a fresh empty one. The only
+  /// mutation accepted while the store is read-only, and the way to make a device carrying
+  /// unreadable data usable again.
+  bool factory_reset();
 
   LearnState state() const { return this->state_; }
   const std::string &last_result() const { return this->last_result_; }
@@ -117,6 +125,8 @@ class RfCloner : public Component, public remote_base::RemoteReceiverListener {
   void publish_state_();
   void publish_store_stats_();
   uint32_t resolve_gap_us_();
+  /// Shared tail of send() and send_by_id(), once a command has been resolved.
+  bool transmit_(const Command &command, uint16_t repeat_override, uint32_t gap_override);
 
   remote_base::RemoteTransmitterBase *transmitter_{nullptr};
   CommandStore store_;
