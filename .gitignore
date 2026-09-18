@@ -8,3 +8,4 @@ tests/test_rf_cloner
 tests/test_rf_cloner.exe
 tests/*.o
 tests/*.log
+.env
