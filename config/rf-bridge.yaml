@@ -3,7 +3,8 @@
 # Learn a command by name, store it on the device, and replay it later - no recompile per
 # command. Requires ESPHome >= 2026.1 and the rf_cloner component in ../components.
 #
-# See docs/hardware.md for wiring and docs/configuration.md for every option.
+# The control entities and Home Assistant actions come from ../packages; see
+# docs/configuration.md. Wiring is in docs/hardware.md.
 
 substitutions:
   name: rf-bridge
@@ -16,6 +17,16 @@ esphome:
     priority: -100
     then:
       - cc1101.begin_rx: cc1101_radio
+
+packages:
+  rf_controls: !include
+    file: ../packages/controls.yaml
+    vars:
+      rf_cloner_id: cloner
+  rf_actions: !include
+    file: ../packages/api-actions.yaml
+    vars:
+      rf_cloner_id: cloner
 
 external_components:
   - source:
@@ -33,51 +44,6 @@ logger:
   level: DEBUG
 
 api:
-  actions:
-    # Convenience layer for automations; the entities below are the primary surface.
-    - action: rf_learn
-      variables:
-        name: string
-      then:
-        - rf_cloner.learn:
-            id: cloner
-            name: !lambda "return name;"
-
-    - action: rf_send
-      variables:
-        name: string
-      then:
-        - rf_cloner.send:
-            id: cloner
-            name: !lambda "return name;"
-
-    - action: rf_delete
-      variables:
-        name: string
-      then:
-        - rf_cloner.delete:
-            id: cloner
-            name: !lambda "return name;"
-
-    - action: rf_cancel
-      then:
-        - rf_cloner.cancel: cloner
-
-    - action: rf_list
-      supports_response: only
-      then:
-        - api.respond:
-            data: !lambda |-
-              JsonArray commands = root["commands"].to<JsonArray>();
-              for (const auto &command_name : id(cloner).store().names()) {
-                commands.add(command_name);
-              }
-              root["count"] = id(cloner).store().count();
-              root["max_commands"] = id(cloner).store().max_commands();
-              root["used_bytes"] = id(cloner).store().used_bytes();
-              root["capacity_bytes"] = id(cloner).store().capacity_bytes();
-              root["state"] = esphome::rf_cloner::learn_state_to_string(id(cloner).state());
-              root["last_result"] = id(cloner).last_result();
   encryption:
       key: !secret api_key
 ota:
@@ -159,66 +125,3 @@ rf_cloner:
           level: WARN
           format: "Learn failed: %s"
           args: ["x.c_str()"]
-
-# Control surface. ESPHome fixes its entity list at compile time, so learned commands cannot each
-# become an entity; these static controls act on any command by name instead.
-
-text:
-  - platform: template
-    id: rf_command_name
-    name: "Command name"
-    optimistic: true
-    restore_value: true
-    mode: text
-    min_length: 0
-    max_length: 23
-    icon: mdi:form-textbox
-
-button:
-  - platform: template
-    name: "Learn command"
-    icon: mdi:radio-tower
-    on_press:
-      - rf_cloner.learn:
-          id: cloner
-          name: !lambda "return id(rf_command_name).state;"
-
-  - platform: template
-    name: "Send command"
-    icon: mdi:send
-    on_press:
-      - rf_cloner.send:
-          id: cloner
-          name: !lambda "return id(rf_command_name).state;"
-
-  - platform: template
-    name: "Delete command"
-    icon: mdi:delete
-    entity_category: config
-    on_press:
-      - rf_cloner.delete:
-          id: cloner
-          name: !lambda "return id(rf_command_name).state;"
-
-  - platform: template
-    name: "Cancel learning"
-    icon: mdi:cancel
-    entity_category: config
-    on_press:
-      - rf_cloner.cancel: cloner
-
-text_sensor:
-  - platform: rf_cloner
-    rf_cloner_id: cloner
-    state:
-      name: "Learn state"
-    last_result:
-      name: "Last result"
-
-sensor:
-  - platform: rf_cloner
-    rf_cloner_id: cloner
-    command_count:
-      name: "Stored commands"
-    storage_used:
-      name: "Storage used"

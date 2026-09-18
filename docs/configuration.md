@@ -90,6 +90,105 @@ hundred microseconds of error.
 
 Override per send with an explicit `gap:` on `rf_cloner.send`.
 
+## Packages
+
+The control entities and the Home Assistant actions ship as includable packages, so a device
+configuration does not have to copy them. Include either, both, or neither.
+
+```yaml
+packages:
+  rf_controls: !include
+    file: packages/controls.yaml
+    vars:
+      rf_cloner_id: cloner
+  rf_actions: !include
+    file: packages/api-actions.yaml
+    vars:
+      rf_cloner_id: cloner
+```
+
+Or straight from the repository, without vendoring anything:
+
+```yaml
+external_components:
+  - source: github://codebyant/esphome-rf-cloner
+    components: [rf_cloner]
+
+packages:
+  rf_bridge:
+    url: https://github.com/codebyant/esphome-rf-cloner
+    files:
+      - path: packages/controls.yaml
+        vars: {rf_cloner_id: cloner}
+      - path: packages/api-actions.yaml
+        vars: {rf_cloner_id: cloner}
+    refresh: 1d
+```
+
+Both packages require an `rf_cloner:` component with a matching id, and a `remote_receiver` and
+`remote_transmitter` for it to use. Neither contains secrets, so both work as remote packages.
+
+### `packages/controls.yaml`
+
+Defines the `text` entity holding the command name, `button` entities for learn, send, delete and
+cancel, and the `text_sensor` and `sensor` diagnostics.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `rf_cloner_id` | `cloner` | The component these controls drive |
+| `rf_name_id` | `rf_command_name` | id of the command-name text entity |
+| `rf_prefix` | *(empty)* | Prepended to every entity name |
+
+### `packages/api-actions.yaml`
+
+Defines `rf_learn`, `rf_send`, `rf_delete`, `rf_cancel` and `rf_list`, callable from Home
+Assistant as `esphome.<node>_rf_learn` and so on. Merges with an existing `api:` block, so a
+device's own actions are kept.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `rf_cloner_id` | `cloner` | The component these actions drive |
+| `rf_action_prefix` | `rf_` | Prepended to every action name |
+
+`rf_list` uses `supports_response: only` and returns JSON:
+
+```yaml
+action: esphome.rf_bridge_rf_list
+response_variable: rf
+```
+
+```json
+{
+  "commands": ["porch_light", "gate_open"],
+  "count": 2,
+  "max_commands": 16,
+  "used_bytes": 1172,
+  "capacity_bytes": 12288,
+  "state": "idle",
+  "last_result": "porch_light"
+}
+```
+
+### Two instances on one device
+
+`rf_cloner` is `MULTI_CONF`, and each instance salts its preference keys with its YAML id, so the
+stores stay separate. Give each its own ids, entity prefix and action prefix:
+
+```yaml
+packages:
+  garage_controls: !include
+    file: packages/controls.yaml
+    vars:
+      rf_cloner_id: garage
+      rf_name_id: garage_command_name
+      rf_prefix: "Garage "
+  garage_actions: !include
+    file: packages/api-actions.yaml
+    vars:
+      rf_cloner_id: garage
+      rf_action_prefix: garage_
+```
+
 ## Actions
 
 ```yaml
@@ -152,8 +251,3 @@ reference configuration.
 - A storage write that fails rolls back the in-RAM state too, so the two never diverge.
 
 Covered by the host tests in [`tests/`](../tests); run `sh tests/run.sh`.
-
-## Multiple instances
-
-`rf_cloner` is `MULTI_CONF`. Each instance salts its preference keys with its YAML id, so two
-bridges on one device keep separate stores.

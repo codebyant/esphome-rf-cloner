@@ -1,0 +1,67 @@
+# Home Assistant API actions for an rf_cloner instance.
+#
+# Exposes learn, send, delete, cancel and list to automations and scripts, as
+# `esphome.<node>_rf_learn` and so on. Independent of packages/controls.yaml: include either,
+# both, or neither.
+#
+#   packages:
+#     rf_actions: !include
+#       file: packages/api-actions.yaml
+#       vars:
+#         rf_cloner_id: cloner
+#
+# Merges with an existing `api:` block, so a device's own actions are preserved.
+#
+# Requires an `rf_cloner:` component with a matching id.
+
+defaults:
+  rf_cloner_id: cloner
+  # Prepended to every action name; change it when exposing two instances on one device.
+  rf_action_prefix: rf_
+
+api:
+  actions:
+    - action: ${rf_action_prefix}learn
+      variables:
+        name: string
+      then:
+        - rf_cloner.learn:
+            id: ${rf_cloner_id}
+            name: !lambda "return name;"
+
+    - action: ${rf_action_prefix}send
+      variables:
+        name: string
+      then:
+        - rf_cloner.send:
+            id: ${rf_cloner_id}
+            name: !lambda "return name;"
+
+    - action: ${rf_action_prefix}delete
+      variables:
+        name: string
+      then:
+        - rf_cloner.delete:
+            id: ${rf_cloner_id}
+            name: !lambda "return name;"
+
+    - action: ${rf_action_prefix}cancel
+      then:
+        - rf_cloner.cancel: ${rf_cloner_id}
+
+    # Returns the stored commands and storage usage as JSON, for a response_variable.
+    - action: ${rf_action_prefix}list
+      supports_response: only
+      then:
+        - api.respond:
+            data: !lambda |-
+              JsonArray commands = root["commands"].to<JsonArray>();
+              for (const auto &command_name : id(${rf_cloner_id}).store().names()) {
+                commands.add(command_name);
+              }
+              root["count"] = id(${rf_cloner_id}).store().count();
+              root["max_commands"] = id(${rf_cloner_id}).store().max_commands();
+              root["used_bytes"] = id(${rf_cloner_id}).store().used_bytes();
+              root["capacity_bytes"] = id(${rf_cloner_id}).store().capacity_bytes();
+              root["state"] = esphome::rf_cloner::learn_state_to_string(id(${rf_cloner_id}).state());
+              root["last_result"] = id(${rf_cloner_id}).last_result();

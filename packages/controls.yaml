@@ -1,0 +1,89 @@
+# Control entities for an rf_cloner instance.
+#
+# A learned command cannot be an entity of its own, because ESPHome fixes its entity list at
+# compile time. These static controls act on any command by name instead, and render in both Home
+# Assistant and ESPHome's built-in web server.
+#
+#   packages:
+#     rf_controls: !include
+#       file: packages/controls.yaml
+#       vars:
+#         rf_cloner_id: cloner
+#
+# Or directly from the repository:
+#
+#   packages:
+#     rf_controls:
+#       url: https://github.com/codebyant/esphome-rf-cloner
+#       files: [{path: packages/controls.yaml, vars: {rf_cloner_id: cloner}}]
+#
+# Requires an `rf_cloner:` component with a matching id.
+
+defaults:
+  # id of the rf_cloner component these controls drive
+  rf_cloner_id: cloner
+  # id of the text entity holding the command name; override when running two instances
+  rf_name_id: rf_command_name
+  # prepended to every entity name, e.g. "Garage " -> "Garage Learn command"
+  rf_prefix: ""
+
+text:
+  - platform: template
+    id: ${rf_name_id}
+    name: "${rf_prefix}Command name"
+    optimistic: true
+    restore_value: true
+    mode: text
+    min_length: 0
+    # Matches the component's own name limit.
+    max_length: 23
+    icon: mdi:form-textbox
+
+button:
+  - platform: template
+    name: "${rf_prefix}Learn command"
+    icon: mdi:radio-tower
+    on_press:
+      - rf_cloner.learn:
+          id: ${rf_cloner_id}
+          name: !lambda "return id(${rf_name_id}).state;"
+
+  - platform: template
+    name: "${rf_prefix}Send command"
+    icon: mdi:send
+    on_press:
+      - rf_cloner.send:
+          id: ${rf_cloner_id}
+          name: !lambda "return id(${rf_name_id}).state;"
+
+  - platform: template
+    name: "${rf_prefix}Delete command"
+    icon: mdi:delete
+    entity_category: config
+    on_press:
+      - rf_cloner.delete:
+          id: ${rf_cloner_id}
+          name: !lambda "return id(${rf_name_id}).state;"
+
+  - platform: template
+    name: "${rf_prefix}Cancel learning"
+    icon: mdi:cancel
+    entity_category: config
+    on_press:
+      - rf_cloner.cancel: ${rf_cloner_id}
+
+text_sensor:
+  - platform: rf_cloner
+    rf_cloner_id: ${rf_cloner_id}
+    state:
+      name: "${rf_prefix}Learn state"
+    last_result:
+      name: "${rf_prefix}Last result"
+
+sensor:
+  - platform: rf_cloner
+    rf_cloner_id: ${rf_cloner_id}
+    command_count:
+      name: "${rf_prefix}Stored commands"
+    storage_used:
+      name: "${rf_prefix}Storage used"
