@@ -36,6 +36,25 @@ static constexpr uint32_t COMMAND_ID_LAST = 0xFFFFFFFEu;
 /// reader can treat "revision changed" as "the registry changed" without a special empty case.
 static constexpr uint32_t REVISION_INITIAL = 1;
 
+/// Reserved terminal revision: never persisted as a committed value.
+///
+/// Bounded by what the restore path can carry rather than by the storage field. `source_revision`
+/// crosses the Home Assistant action boundary as a signed 32-bit integer, so a revision above
+/// INT32_MAX could be written to flash and reported, but never handed back during a replacement
+/// restore. Constraining the logical domain to the transport's range keeps every committed
+/// revision restorable. The on-flash field stays uint32_t; only the value domain is narrowed.
+static constexpr uint32_t REVISION_TERMINAL = 0x7FFFFFFFu;  // INT32_MAX
+
+/// Highest revision that is ever written, one below the terminal value.
+///
+/// Every revision-advancing operation refuses once the value it would succeed has reached this,
+/// so the sequence is exhausted explicitly instead of wrapping to 0 - and 0 is what a reader takes
+/// to mean "never written".
+static constexpr uint32_t REVISION_MAX = REVISION_TERMINAL - 1;
+
+static_assert(REVISION_MAX < REVISION_TERMINAL, "the terminal revision must stay unreachable");
+static_assert(REVISION_TERMINAL <= 0x7FFFFFFFu, "every revision must fit the transport's int32");
+
 /// Fills `out` with `len` random bytes, used once per bridge to mint a bridge_id.
 ///
 /// Deliberately left undefined here: the device build satisfies it from ESPHome's random_bytes()
@@ -57,6 +76,9 @@ enum class StoreResult : uint8_t {
   /// Storage holds data this firmware refuses to interpret or rewrite; see LoadReport::fault.
   READ_ONLY,
   ID_EXHAUSTED,
+  /// The revision sequence has no room left; publishing another would reach the reserved
+  /// terminal value. The registry is still readable and replayable.
+  REVISION_EXHAUSTED,
   ID_CONFLICT,
   RESTORE_NOT_EMPTY,
   RESTORE_NOT_ACTIVE,
@@ -193,7 +215,16 @@ class CommandStore {
   /// Write one command under the id it held on the bridge being restored.
   StoreResult import_command(const Command &command);
   /// Mark the restore complete. Until this lands, begin() reports restore_incomplete.
-  StoreResult restore_commit();
+  ///
+  /// `source_revision` is the revision the restored registry had on the bridge it came from,
+  /// supplied by the restorer because this firmware does not carry it on flash. The committed
+  /// revision is one past the greater of that and the local revision, so a logical bridge never
+  /// republishes a revision a reader has already seen - which would make revision useless as a
+  /// change token. Pass 0 when no source revision is known, to keep the local sequence.
+  ///
+  /// Refused with REVISION_EXHAUSTED when that would reach the reserved terminal value; the
+  /// restore then stays open and nothing is written.
+  StoreResult restore_commit(uint32_t source_revision);
 
   size_t count() const;
   std::vector<std::string> names() const;

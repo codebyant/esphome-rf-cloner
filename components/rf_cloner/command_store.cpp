@@ -122,6 +122,8 @@ const char *store_result_to_string(StoreResult result) {
       return "storage_error";
     case StoreResult::READ_ONLY:
       return "read_only";
+    case StoreResult::REVISION_EXHAUSTED:
+      return "revision_exhausted";
     case StoreResult::ID_EXHAUSTED:
       return "id_exhausted";
     case StoreResult::ID_CONFLICT:
@@ -151,6 +153,24 @@ const char *store_fault_to_string(StoreFault fault) {
   }
   return "unknown";
 }
+
+namespace {
+
+/// The revision that follows `base`, or false when there is no room left in the sequence.
+///
+/// Computed without ever forming base + 1 on a value that would pass the ceiling, so the terminal
+/// revision is refused rather than published. REVISION_MAX is the highest value written; reaching
+/// it stops further mutations instead of letting the token restart at 0. Because REVISION_MAX sits
+/// below INT32_MAX, every value this returns survives the restore path's signed transport.
+bool next_revision(uint32_t base, uint32_t &out) {
+  if (base >= REVISION_MAX) {
+    return false;
+  }
+  out = base + 1;
+  return true;
+}
+
+}  // namespace
 
 StoreResult CommandStore::validate_name(const std::string &name) {
   if (name.empty()) {
@@ -455,13 +475,17 @@ StoreResult CommandStore::put(const Command &command) {
   Command previous = this->slots_[slot];
   const uint32_t previous_next_id = this->next_command_id_;
   const uint32_t previous_revision = this->revision_;
+  uint32_t committed_revision;
+  if (!next_revision(this->revision_, committed_revision)) {
+    return StoreResult::REVISION_EXHAUSTED;
+  }
 
   this->slots_[slot] = command;
   this->slots_[slot].command_id = command_id;
   if (!overwriting) {
     this->next_command_id_ = command_id + 1;
   }
-  this->revision_++;
+  this->revision_ = committed_revision;
 
   // Payload first: a half-applied write is invisible until the index references it.
   if (!this->write_payload_(static_cast<uint8_t>(slot)) || !this->write_index_()) {
@@ -518,8 +542,12 @@ StoreResult CommandStore::rename(uint32_t command_id, const std::string &new_nam
 
   const std::string previous = this->slots_[slot].name;
   const uint32_t previous_revision = this->revision_;
+  uint32_t committed_revision;
+  if (!next_revision(this->revision_, committed_revision)) {
+    return StoreResult::REVISION_EXHAUSTED;
+  }
   this->slots_[slot].name = new_name;
-  this->revision_++;
+  this->revision_ = committed_revision;
 
   // Index only: the waveform record is untouched, so a rename cannot damage it.
   if (!this->write_index_()) {
@@ -553,10 +581,16 @@ StoreResult CommandStore::remove_by_id(uint32_t command_id) {
     return StoreResult::NOT_FOUND;
   }
 
+  // Checked before the slot is moved out of, so a refusal leaves the command intact.
+  uint32_t committed_revision;
+  if (!next_revision(this->revision_, committed_revision)) {
+    return StoreResult::REVISION_EXHAUSTED;
+  }
+
   Command previous = std::move(this->slots_[slot]);
   const uint32_t previous_revision = this->revision_;
   this->slots_[slot] = Command{};
-  this->revision_++;
+  this->revision_ = committed_revision;
 
   // Only the index is rewritten; the orphaned payload stays on flash until the slot is reused
   // and is not counted by used_bytes(). next_command_id is untouched, so the freed id is gone
@@ -585,12 +619,16 @@ StoreResult CommandStore::clear_all() {
 
   std::vector<Command> previous = this->slots_;
   const uint32_t previous_revision = this->revision_;
+  uint32_t committed_revision;
+  if (!next_revision(this->revision_, committed_revision)) {
+    return StoreResult::REVISION_EXHAUSTED;
+  }
   const uint8_t previous_restore_state = this->restore_state_;
   this->slots_.assign(this->max_commands_, Command{});
   // Clearing is also how an unfinished restore is abandoned; the identity it adopted is kept,
   // because adopting it was explicit and a retry needs it.
   this->restore_state_ = 0;
-  this->revision_++;
+  this->revision_ = committed_revision;
 
   // bridge_id and next_command_id are deliberately preserved: clearing the commands does not make
   // this a different logical bridge, and an id that has been handed out once must never come back.
@@ -642,12 +680,16 @@ StoreResult CommandStore::restore_begin(const uint8_t *bridge_id, uint32_t next_
   std::memcpy(previous_bridge, this->bridge_id_, BRIDGE_ID_BYTES);
   const uint32_t previous_next_id = this->next_command_id_;
   const uint32_t previous_revision = this->revision_;
+  uint32_t committed_revision;
+  if (!next_revision(this->revision_, committed_revision)) {
+    return StoreResult::REVISION_EXHAUSTED;
+  }
   const uint8_t previous_restore_state = this->restore_state_;
 
   std::memcpy(this->bridge_id_, bridge_id, BRIDGE_ID_BYTES);
   this->next_command_id_ = next_command_id;
   this->restore_state_ = 1;
-  this->revision_++;
+  this->revision_ = committed_revision;
 
   if (!this->write_index_()) {
     std::memcpy(this->bridge_id_, previous_bridge, BRIDGE_ID_BYTES);
@@ -696,8 +738,12 @@ StoreResult CommandStore::import_command(const Command &command) {
   }
 
   const uint32_t previous_revision = this->revision_;
+  uint32_t committed_revision;
+  if (!next_revision(this->revision_, committed_revision)) {
+    return StoreResult::REVISION_EXHAUSTED;
+  }
   this->slots_[slot] = command;
-  this->revision_++;
+  this->revision_ = committed_revision;
 
   if (!this->write_payload_(static_cast<uint8_t>(slot)) || !this->write_index_()) {
     this->slots_[slot] = Command{};
@@ -708,7 +754,7 @@ StoreResult CommandStore::import_command(const Command &command) {
   return StoreResult::OK;
 }
 
-StoreResult CommandStore::restore_commit() {
+StoreResult CommandStore::restore_commit(uint32_t source_revision) {
   if (this->backend_ == nullptr) {
     return StoreResult::STORAGE_ERROR;
   }
@@ -719,9 +765,26 @@ StoreResult CommandStore::restore_commit() {
     return StoreResult::RESTORE_NOT_ACTIVE;
   }
 
+  // Continue the source registry's revision sequence rather than the local one: the revisions
+  // written while the restore was open are progress state, not part of the logical bridge's
+  // sequence. Never below the local revision either, because a restore can follow a clear_all on
+  // this same bridge, which already published revisions under this identity. Taking the greater of
+  // the two keeps the revision strictly increasing however the registry arrived here, which is what
+  // lets a reader use it as a change token.
+  //
+  // The maximum is taken before adding, so no addition is ever performed on a value that could
+  // overflow; an exhausted sequence is refused instead of wrapping to 0.
+  const uint32_t base = source_revision > this->revision_ ? source_revision : this->revision_;
+  uint32_t committed_revision;
+  if (!next_revision(base, committed_revision)) {
+    // Nothing is written and restore_state_ is untouched, so the restore stays open and visible
+    // rather than half-applied.
+    return StoreResult::REVISION_EXHAUSTED;
+  }
+
   const uint32_t previous_revision = this->revision_;
   this->restore_state_ = 0;
-  this->revision_++;
+  this->revision_ = committed_revision;
 
   if (!this->write_index_()) {
     this->restore_state_ = 1;

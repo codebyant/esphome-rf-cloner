@@ -59,6 +59,13 @@ template<typename... Ts> class DeleteAction : public Action<Ts...>, public Paren
   void play(const Ts &...x) override { this->parent_->erase(this->name_.value(x...)); }
 };
 
+template<typename... Ts> class DeleteByIdAction : public Action<Ts...>, public Parented<RfCloner> {
+ public:
+  TEMPLATABLE_VALUE(uint32_t, command_id)
+
+  void play(const Ts &...x) override { this->parent_->erase_by_id(this->command_id_.value(x...)); }
+};
+
 template<typename... Ts> class ClearAllAction : public Action<Ts...>, public Parented<RfCloner> {
  public:
   void play(const Ts &...x) override { this->parent_->clear_all(); }

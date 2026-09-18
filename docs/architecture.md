@@ -114,7 +114,7 @@ The 28-byte metadata block at the head of the index holds:
 | --- | --- |
 | `bridge_id` | 16 random bytes minted once, identifying the logical bridge rather than the board. Independent of MAC, IP and node name, so a replacement ESP32 can be restored into the same logical bridge. |
 | `next_command_id` | Monotonic `uint32`. Never rewound, so an id is never handed out twice. |
-| `revision` | Incremented once per committed mutation. Starts at 1; 0 never reaches flash. |
+| `revision` | Incremented once per committed mutation. Starts at 1; 0 never reaches flash. A restore continues the sequence of the registry it came from, so the value never repeats for one logical bridge. |
 | `restore_state` | 1 while a restore is in progress. |
 
 A command is identified by its `command_id`, which is immutable. The name is mutable metadata:
@@ -128,6 +128,34 @@ renaming a command to the name it already has, or clearing a registry that is al
 no restore open, both succeed without writing. A reader can therefore treat a changed `revision`
 as a real change. Clearing *does* write when a restore is open, even with nothing imported yet,
 because abandoning the restore is itself a change.
+
+Because a reader may cache against `revision`, it must never repeat for one `bridge_id`. Two paths
+would otherwise restart it: replacement hardware begins its own registry at 1, and `clear_all`
+keeps the identity while advancing the revision, so a later restore onto the same bridge would
+collide with what the clear already published. `rf_restore_commit` therefore takes the revision the
+restored registry had on its source bridge, and publishes one past the greater of that and the
+local revision. The device does not keep `source_revision` on flash: the restorer holds it in the
+backup it is restoring from, which is why it is a parameter rather than stored state. The revisions
+written while a restore is open are progress state and are not part of the logical sequence.
+
+The sequence is bounded rather than wrapping, and its bound comes from the restore path rather than
+from the storage field. `source_revision` crosses the Home Assistant action boundary as a signed
+32-bit integer, so a revision above `INT32_MAX` could be written and reported but never handed
+back during a replacement restore. The logical domain is therefore `REVISION_TERMINAL = INT32_MAX`,
+reserved and never persisted, with `REVISION_MAX = INT32_MAX - 1` the highest revision that ever
+reaches flash. The on-flash field stays `uint32_t`; only the value domain is narrowed. Every
+committed revision is consequently one a restore can carry.
+
+Every revision-advancing operation takes the maximum of the values involved *before* adding one, so
+a successor is never formed on a value that would pass the ceiling, and refuses with
+`revision_exhausted` once there is no room left. A refused operation writes nothing: a restore stays
+open and visible, and a normal mutation leaves the registry exactly as it was. The registry stays
+readable and replayable in that state - only writes are closed off. Wrapping to 0 is excluded by
+construction, which matters because 0 is what a reader takes to mean "never written".
+
+Reaching the ceiling through ordinary use is not possible: it would take over two billion mutations,
+far beyond the flash's endurance. The bound exists because `source_revision` arrives from outside
+and must not be able to push the sequence past what a later restore could express.
 
 Identity and slots live in the same record because assigning an id and advancing
 `next_command_id` must commit together; a separate metadata record would leave a window where a

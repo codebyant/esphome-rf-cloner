@@ -92,6 +92,8 @@ class RfCloner : public Component, public remote_base::RemoteReceiverListener {
   /// Change a command's name, keeping its id and waveform.
   bool rename(uint32_t command_id, const std::string &new_name);
   bool erase(const std::string &name);
+  /// Delete by immutable id, so a caller that holds one is unaffected by a rename.
+  bool erase_by_id(uint32_t command_id);
   void clear_all();
   /// Discard the stored registry, including its identity, and write a fresh empty one. The only
   /// mutation accepted while the store is read-only, and the way to make a device carrying
@@ -103,7 +105,11 @@ class RfCloner : public Component, public remote_base::RemoteReceiverListener {
   /// Write one exported command back under the id it had on the bridge being restored.
   bool import_command(uint32_t command_id, const std::string &name, const std::vector<int32_t> &timings,
                       uint32_t gap_us, uint16_t repeat_times, uint32_t frequency_hz, uint8_t modulation);
-  bool restore_commit();
+  /// Close the restore, continuing the source registry's revision sequence.
+  ///
+  /// Signed, because that is what the API action delivers: a negative value would otherwise be
+  /// narrowed to a huge uint32 and push the revision near its ceiling. Rejected here instead.
+  bool restore_commit(int32_t source_revision);
 
   LearnState state() const { return this->state_; }
   const std::string &last_result() const { return this->last_result_; }

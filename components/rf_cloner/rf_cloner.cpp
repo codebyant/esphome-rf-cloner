@@ -552,6 +552,23 @@ bool RfCloner::erase(const std::string &name) {
   return true;
 }
 
+bool RfCloner::erase_by_id(uint32_t command_id) {
+  Command command;
+  const bool known = this->store_.get_by_id(command_id, command);
+  const StoreResult result = this->store_.remove_by_id(command_id);
+  if (result != StoreResult::OK) {
+    ESP_LOGW(TAG, "Cannot delete #%" PRIu32 ": %s", command_id, store_result_to_string(result));
+    this->last_result_ = std::string("delete_failed:") + store_result_to_string(result);
+    this->publish_state_();
+    return false;
+  }
+  ESP_LOGI(TAG, "Deleted '%s' (#%" PRIu32 ")", known ? command.name.c_str() : "?", command_id);
+  this->last_result_ = "deleted:" + (known ? command.name : "#" + std::to_string(command_id));
+  this->publish_state_();
+  this->publish_store_stats_();
+  return true;
+}
+
 void RfCloner::clear_all() {
   const StoreResult result = this->store_.clear_all();
   if (result != StoreResult::OK) {
@@ -647,16 +664,23 @@ bool RfCloner::import_command(uint32_t command_id, const std::string &name, cons
   return true;
 }
 
-bool RfCloner::restore_commit() {
-  const StoreResult result = this->store_.restore_commit();
+bool RfCloner::restore_commit(int32_t source_revision) {
+  if (source_revision < 0) {
+    ESP_LOGE(TAG, "Cannot commit the restore: source_revision %" PRId32 " is negative", source_revision);
+    this->last_result_ = "restore_commit_failed:bad_source_revision";
+    this->publish_state_();
+    return false;
+  }
+  const StoreResult result = this->store_.restore_commit(static_cast<uint32_t>(source_revision));
   if (result != StoreResult::OK) {
-    ESP_LOGE(TAG, "Cannot commit restore: %s", store_result_to_string(result));
+    ESP_LOGE(TAG, "Cannot commit the restore: %s", store_result_to_string(result));
     this->last_result_ = std::string("restore_commit_failed:") + store_result_to_string(result);
     this->publish_state_();
     return false;
   }
-  ESP_LOGW(TAG, "Restore committed: %u command(s), bridge id %s", static_cast<unsigned>(this->store_.count()),
-           this->store_.bridge_id_hex().c_str());
+  ESP_LOGW(TAG, "Restore committed: %u command(s), bridge id %s, revision %" PRIu32 " (source %" PRId32 ")",
+           static_cast<unsigned>(this->store_.count()), this->store_.bridge_id_hex().c_str(),
+           this->store_.revision(), source_revision);
   this->last_result_ = "restore_committed";
   this->publish_state_();
   this->publish_store_stats_();

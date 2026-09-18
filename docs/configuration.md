@@ -159,7 +159,7 @@ Merges with an existing `api:` block, so a device's own actions are kept.
 | `rf_export` | `command_id` | One command as a portable JSON record, waveform included |
 | `rf_restore_begin` | `bridge_id`, `next_command_id` | Adopt an identity and open a restore |
 | `rf_import` | `command_id`, `name`, `timings`, `gap_us`, `repeat_times`, `frequency_hz`, `modulation` | Write one exported command back under its original id |
-| `rf_restore_commit` | — | Close the restore |
+| `rf_restore_commit` | `source_revision` | Close the restore, continuing the source registry's revision sequence |
 | `rf_list` | — | Older name-only read, superseded by `rf_status` |
 
 ### Export and restore
@@ -193,11 +193,23 @@ partial:
 ```
 rf_restore_begin(bridge_id, next_command_id)
 rf_import(...)   once per command
-rf_restore_commit()
+rf_restore_commit(source_revision)
 ```
 
 `rf_restore_begin` is accepted only on an empty registry — that is what keeps a stale backup from
 overwriting a live bridge — and rejects a `bridge_id` that is not exactly 32 hex characters.
+
+`source_revision` is the `revision` the backup was taken at. The committed revision is one past
+the greater of that and the device's own revision, so one logical bridge never publishes a revision
+twice and a reader can keep using `revision` as a change token across a hardware swap. Pass `0` if
+no source revision is known, and the device keeps its local sequence.
+
+The argument is a signed 32-bit field, and the device bounds its own revisions by the same range, so
+every revision it can report is one that can be sent back here. Valid values are `0` to
+`2147483646`; `2147483647` is reserved as the terminal revision and is never persisted. A negative
+value is rejected rather than being read as a very large unsigned one. The commit is refused with
+`revision_exhausted` when the greater of `source_revision` and the device's own revision has already
+reached the ceiling; the restore then stays open and nothing is written.
 Between begin and commit, `rf_status` reports `restore_incomplete: true` and normal mutations are
 refused; `rf_clear` abandons the attempt, keeping the adopted identity so it can simply be
 replayed. An interrupted restore survives a reboot as `restore_incomplete`, and replaying it from

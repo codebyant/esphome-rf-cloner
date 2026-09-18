@@ -1,0 +1,28 @@
+learn:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: rf_cloner
+    name:
+      required: true
+      example: fan_speed_up
+      selector:
+        text:
+
+cancel_learn:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: rf_cloner
+
+export_snapshot:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: rf_cloner

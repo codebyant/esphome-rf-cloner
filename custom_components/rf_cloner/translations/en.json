@@ -1,0 +1,169 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect an RF bridge",
+        "description": "Pick the ESPHome node running the rf_cloner component. Its learned commands become Home Assistant entities.",
+        "data": {
+          "esphome_entry_id": "ESPHome device",
+          "action_prefix": "Action prefix"
+        },
+        "data_description": {
+          "esphome_entry_id": "The node that carries the bridge. It must be connected.",
+          "action_prefix": "Only change this if the node's rf_cloner actions were given a prefix other than rf_."
+        }
+      },
+      "reconfigure": {
+        "title": "Move this bridge to another node",
+        "description": "Point this bridge at a different ESPHome node. If the node is replacement hardware, you will be offered a restore.",
+        "data": {
+          "esphome_entry_id": "ESPHome device",
+          "action_prefix": "Action prefix"
+        },
+        "data_description": {
+          "esphome_entry_id": "The node that now carries this bridge.",
+          "action_prefix": "Only change this if the node's rf_cloner actions were given a prefix other than rf_."
+        }
+      },
+      "replace": {
+        "title": "Restore onto replacement hardware",
+        "description": "This node is empty and reports a different identity ({found_bridge_id}). Restoring writes {commands} command(s) back onto it as bridge {bridge_id}, keeping every command id so your dashboards and automations keep working."
+      }
+    },
+    "error": {
+      "cannot_connect": "The node did not answer. Check that it is online and running the rf_cloner component.",
+      "no_bridge_actions": "That node exposes no rf_cloner actions. Check that it includes packages/api-actions.yaml and is connected.",
+      "esphome_entry_missing": "That ESPHome device no longer exists.",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This bridge is already set up.",
+      "reconfigure_successful": "The bridge now uses the selected node.",
+      "restore_successful": "The bridge was restored onto the replacement hardware.",
+      "no_snapshot": "There is no snapshot to restore. Home Assistant has never read a complete copy of this bridge's commands.",
+      "restore_not_possible": "This node cannot be restored onto: {detail}.",
+      "restore_failed": "The restore did not complete: {detail}."
+    }
+  },
+  "config_subentries": {
+    "command": {
+      "entry_type": "RF command",
+      "initiate_flow": {
+        "user": "Learn a command",
+        "reconfigure": "Rename command"
+      },
+      "step": {
+        "user": {
+          "title": "Learn a command",
+          "description": "Name the command, then hold the button on your remote when asked. Letters, digits, underscore, hyphen and full stop only, up to 23 characters.",
+          "data": {
+            "name": "Name"
+          },
+          "data_description": {
+            "name": "Stored on the device, so it is also what the bridge's own web page shows."
+          }
+        },
+        "reconfigure": {
+          "title": "Rename command",
+          "description": "Renaming changes the label only. The command keeps its identity, so entities, history and automations are unaffected.",
+          "data": {
+            "name": "Name"
+          },
+          "data_description": {
+            "name": "Letters, digits, underscore, hyphen and full stop only, up to 23 characters."
+          }
+        }
+      },
+      "progress": {
+        "learning": "Press and hold the button on your remote now to teach it \"{name}\"."
+      },
+      "error": {
+        "name_empty": "Enter a name.",
+        "name_too_long": "That name is longer than 23 characters.",
+        "name_invalid": "Use only letters, digits, underscore, hyphen and full stop.",
+        "name_taken": "This bridge already has a command with that name.",
+        "rename_failed": "The device refused the rename."
+      },
+      "abort": {
+        "not_loaded": "The bridge is not ready yet. Try again once it has connected.",
+        "not_writable": "The bridge is not accepting changes right now.",
+        "registry_full": "The bridge has no free command slots left.",
+        "unknown_command": "This command's configuration is unreadable.",
+        "learn_failed": "Nothing was learned: {detail}.",
+        "reconfigure_successful": "The command was renamed.",
+        "already_configured": "This command is already set up."
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "read_only": { "name": "Read-only storage" },
+      "restore_incomplete": { "name": "Unfinished restore" }
+    },
+    "button": {
+      "cancel_learn": { "name": "Cancel learning" }
+    },
+    "sensor": {
+      "command_count": { "name": "Stored commands" },
+      "storage_used": { "name": "Storage used" },
+      "last_result": { "name": "Last result" },
+      "revision": { "name": "Registry revision" },
+      "learn_state": {
+        "name": "Learn state",
+        "state": {
+          "idle": "Idle",
+          "armed": "Waiting for a button press",
+          "captured": "Captured",
+          "failed": "Failed",
+          "unknown": "Unknown"
+        }
+      }
+    }
+  },
+  "services": {
+    "learn": {
+      "name": "Learn command",
+      "description": "Captures a command from a remote and stores it on the bridge. Waits for the capture to finish.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bridge",
+          "description": "The bridge that should listen."
+        },
+        "name": {
+          "name": "Name",
+          "description": "Letters, digits, underscore, hyphen and full stop only, up to 23 characters."
+        }
+      }
+    },
+    "cancel_learn": {
+      "name": "Cancel learning",
+      "description": "Disarms a capture that is waiting for a button press.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bridge",
+          "description": "The bridge to disarm."
+        }
+      }
+    },
+    "export_snapshot": {
+      "name": "Export snapshot",
+      "description": "Returns Home Assistant's restorable copy of the bridge's commands, waveforms included.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bridge",
+          "description": "The bridge whose snapshot to return."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "unknown_entry": { "message": "{entry_id} is not an RF bridge." },
+    "entry_not_loaded": { "message": "The bridge {title} is not loaded." },
+    "esphome_entry_missing": { "message": "The ESPHome device this bridge was set up against no longer exists." },
+    "name_empty": { "message": "Enter a name for the command." },
+    "name_too_long": { "message": "\"{name}\" is longer than the 23 characters the bridge stores." },
+    "name_invalid": { "message": "\"{name}\" may only contain letters, digits, underscore, hyphen and full stop." },
+    "learn_failed": { "message": "Nothing was learned as \"{name}\": {detail}." },
+    "no_snapshot": { "message": "Home Assistant has no snapshot of {title} yet." }
+  }
+}

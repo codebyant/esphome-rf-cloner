@@ -520,7 +520,7 @@ void test_id_exhaustion_fails_rather_than_wraps() {
   uint8_t bridge[BRIDGE_ID_BYTES];
   std::memset(bridge, 0xAB, sizeof(bridge));
   CHECK(store.restore_begin(bridge, COMMAND_ID_LAST) == StoreResult::OK);
-  CHECK(store.restore_commit() == StoreResult::OK);
+  CHECK(store.restore_commit(0) == StoreResult::OK);
   CHECK(store.next_command_id() == COMMAND_ID_LAST);
 
   CHECK(store.put(make_command("last")) == StoreResult::OK);
@@ -774,9 +774,9 @@ void test_restore_flow() {
   CHECK(store.import_command(duplicate_name) == StoreResult::NAME_TAKEN);
   CHECK(store.count() == 2);
 
-  CHECK(store.restore_commit() == StoreResult::OK);
+  CHECK(store.restore_commit(0) == StoreResult::OK);
   CHECK(!store.restore_incomplete());
-  CHECK(store.restore_commit() == StoreResult::RESTORE_NOT_ACTIVE);
+  CHECK(store.restore_commit(0) == StoreResult::RESTORE_NOT_ACTIVE);
 
   CommandStore reloaded;
   reloaded.configure(&backend, 8, 256, 12288, 0);
@@ -823,7 +823,7 @@ void test_restore_in_progress_blocks_normal_mutations() {
   CHECK(store.get_by_id(1, out));
   CHECK(out.name == "vel_1");
 
-  CHECK(store.restore_commit() == StoreResult::OK);
+  CHECK(store.restore_commit(0) == StoreResult::OK);
   CHECK(store.put(make_command("learned")) == StoreResult::OK);
 }
 
@@ -862,8 +862,211 @@ void test_interrupted_restore_is_visible() {
   Command one = make_command("vel_1");
   one.command_id = 1;
   CHECK(reloaded.import_command(one) == StoreResult::OK);
-  CHECK(reloaded.restore_commit() == StoreResult::OK);
+  CHECK(reloaded.restore_commit(0) == StoreResult::OK);
   CHECK(!reloaded.restore_incomplete());
+}
+
+void test_restore_revision_continues_the_logical_sequence() {
+  std::printf("store: a restored registry continues the logical revision sequence\n");
+  uint8_t bridge[BRIDGE_ID_BYTES];
+  std::memset(bridge, 0x3C, sizeof(bridge));
+
+  // Replacement hardware: a fresh registry, whose own revision sequence starts over.
+  FakeBackend backend;
+  CommandStore store;
+  store.configure(&backend, 8, 256, 12288, 0);
+  store.begin();
+  CHECK(store.revision() == REVISION_INITIAL);
+
+  // Restoring a replica taken at revision 14 publishes 15, not the local progress value.
+  CHECK(store.restore_begin(bridge, 4) == StoreResult::OK);
+  Command two = make_command("probe_2");
+  two.command_id = 2;
+  CHECK(store.import_command(two) == StoreResult::OK);
+  const uint32_t progress_revision = store.revision();
+  CHECK(progress_revision < 14);  // the open restore wrote only local progress
+  CHECK(store.restore_commit(14) == StoreResult::OK);
+  CHECK(store.revision() == 15);
+  CHECK(!store.restore_incomplete());
+
+  // The next ordinary mutation continues from there.
+  CHECK(store.put(make_command("vel_1")) == StoreResult::OK);
+  CHECK(store.revision() == 16);
+
+  // It survives a reboot, so a reader cannot see the sequence restart.
+  CommandStore reloaded;
+  reloaded.configure(&backend, 8, 256, 12288, 0);
+  reloaded.begin();
+  CHECK(reloaded.revision() == 16);
+
+  // A second replacement, restoring the replica as it now stands, cannot republish a revision the
+  // reader has already seen.
+  CHECK(reloaded.factory_reset() == StoreResult::OK);
+  CHECK(reloaded.revision() == REVISION_INITIAL);
+  CHECK(reloaded.restore_begin(bridge, 4) == StoreResult::OK);
+  CHECK(reloaded.import_command(two) == StoreResult::OK);
+  CHECK(reloaded.restore_commit(16) == StoreResult::OK);
+  CHECK(reloaded.revision() == 17);
+  CHECK(reloaded.revision() != 15);
+  CHECK(reloaded.revision() != 16);
+}
+
+void test_restore_after_clear_does_not_reuse_a_revision() {
+  std::printf("store: a restore after a clear outruns the revisions the clear published\n");
+  uint8_t bridge[BRIDGE_ID_BYTES];
+  std::memset(bridge, 0x77, sizeof(bridge));
+
+  FakeBackend backend;
+  CommandStore store;
+  store.configure(&backend, 8, 256, 12288, 0);
+  store.begin();
+  CHECK(store.restore_begin(bridge, 4) == StoreResult::OK);
+  Command two = make_command("probe_2");
+  two.command_id = 2;
+  CHECK(store.import_command(two) == StoreResult::OK);
+  CHECK(store.restore_commit(14) == StoreResult::OK);
+  CHECK(store.revision() == 15);
+
+  // clear_all keeps the bridge identity, so the next restore lands on the *same* logical bridge,
+  // which has already published revision 16 for the clear itself. Replaying the same replica must
+  // not hand that reader revision 15 again, or a snapshot keyed on revision would never refresh.
+  CHECK(store.clear_all() == StoreResult::OK);
+  const uint32_t cleared_revision = store.revision();
+  CHECK(cleared_revision == 16);
+  CHECK(store.restore_begin(bridge, 4) == StoreResult::OK);
+  CHECK(store.import_command(two) == StoreResult::OK);
+  CHECK(store.restore_commit(14) == StoreResult::OK);
+  CHECK(store.revision() > cleared_revision);
+  CHECK(store.revision() != 15);
+}
+
+void test_interrupted_restore_exposes_no_committed_revision() {
+  std::printf("store: an interrupted restore never publishes the committed revision\n");
+  uint8_t bridge[BRIDGE_ID_BYTES];
+  std::memset(bridge, 0x2B, sizeof(bridge));
+
+  FakeBackend backend;
+  {
+    CommandStore store;
+    store.configure(&backend, 8, 256, 12288, 0);
+    store.begin();
+    CHECK(store.restore_begin(bridge, 4) == StoreResult::OK);
+    Command two = make_command("probe_2");
+    two.command_id = 2;
+    CHECK(store.import_command(two) == StoreResult::OK);
+    // Power lost here: restore_commit(14) never runs.
+  }
+
+  CommandStore reloaded;
+  reloaded.configure(&backend, 8, 256, 12288, 0);
+  const LoadReport report = reloaded.begin();
+  CHECK(report.restore_incomplete);
+  CHECK(reloaded.restore_incomplete());
+  // Nothing may look like a finished restore of revision 14.
+  CHECK(reloaded.revision() != 15);
+  CHECK(reloaded.revision() < 15);
+
+  // Committing the retry still lands on the source sequence.
+  CHECK(reloaded.restore_commit(14) == StoreResult::OK);
+  CHECK(reloaded.revision() == 15);
+  CHECK(!reloaded.restore_incomplete());
+}
+
+void test_revision_ceiling_is_refused_not_wrapped() {
+  std::printf("store: the revision domain is bounded by what a restore can carry\n");
+  uint8_t bridge[BRIDGE_ID_BYTES];
+  std::memset(bridge, 0x11, sizeof(bridge));
+
+  // The whole domain is representable by the signed transport the restore path uses, so no
+  // committed revision can exist that Home Assistant could snapshot but never send back.
+  CHECK(REVISION_MAX < REVISION_TERMINAL);
+  CHECK(REVISION_TERMINAL == 0x7FFFFFFFu);
+  CHECK(REVISION_MAX <= static_cast<uint32_t>(INT32_MAX));
+
+  // One below the ceiling, an ordinary mutation still succeeds and lands exactly on it.
+  {
+    FakeBackend backend;
+    CommandStore store;
+    store.configure(&backend, 8, 256, 12288, 0);
+    store.begin();
+    CHECK(store.restore_begin(bridge, 4) == StoreResult::OK);
+    Command two = make_command("probe_2");
+    two.command_id = 2;
+    CHECK(store.import_command(two) == StoreResult::OK);
+    CHECK(store.restore_commit(REVISION_MAX - 2) == StoreResult::OK);
+    CHECK(store.revision() == REVISION_MAX - 1);
+
+    CHECK(store.put(make_command("vel_1")) == StoreResult::OK);
+    CHECK(store.revision() == REVISION_MAX);
+
+    // At the ceiling every further mutation is refused rather than passing the terminal value.
+    CHECK(store.put(make_command("vel_2")) == StoreResult::REVISION_EXHAUSTED);
+    CHECK(store.rename(2, "probe_2b") == StoreResult::REVISION_EXHAUSTED);
+    CHECK(store.remove_by_id(2) == StoreResult::REVISION_EXHAUSTED);
+    CHECK(store.clear_all() == StoreResult::REVISION_EXHAUSTED);
+    CHECK(store.revision() == REVISION_MAX);
+    CHECK(store.revision() != REVISION_TERMINAL);
+    CHECK(store.revision() != 0);
+
+    // The registry is still readable and replayable; only writes are closed off.
+    Command out;
+    CHECK(store.get_by_id(2, out));
+    CHECK(out.name == "probe_2");
+    CHECK(!store.read_only());
+  }
+
+  // A source revision at or past the ceiling has no successor to publish.
+  {
+    FakeBackend backend;
+    CommandStore store;
+    store.configure(&backend, 8, 256, 12288, 0);
+    store.begin();
+    CHECK(store.restore_begin(bridge, 4) == StoreResult::OK);
+    Command two = make_command("probe_2");
+    two.command_id = 2;
+    CHECK(store.import_command(two) == StoreResult::OK);
+    const uint32_t before = store.revision();
+
+    CHECK(store.restore_commit(REVISION_MAX) == StoreResult::REVISION_EXHAUSTED);
+    // Nothing was written, so the restore stays open and visible rather than half applied.
+    CHECK(store.restore_incomplete());
+    CHECK(store.revision() == before);
+
+    CHECK(store.restore_commit(REVISION_TERMINAL) == StoreResult::REVISION_EXHAUSTED);
+    CHECK(store.restore_incomplete());
+    // Values beyond the domain, which the transport could never deliver, are refused too.
+    CHECK(store.restore_commit(UINT32_MAX) == StoreResult::REVISION_EXHAUSTED);
+    CHECK(store.restore_incomplete());
+    CHECK(store.revision() == before);
+
+    // One below the ceiling commits, landing on the highest publishable revision.
+    CHECK(store.restore_commit(REVISION_MAX - 1) == StoreResult::OK);
+    CHECK(store.revision() == REVISION_MAX);
+    CHECK(!store.restore_incomplete());
+  }
+
+  // A local revision already at the ceiling refuses a commit whatever the source says.
+  {
+    FakeBackend backend;
+    CommandStore store;
+    store.configure(&backend, 8, 256, 12288, 0);
+    store.begin();
+    CHECK(store.restore_begin(bridge, 4) == StoreResult::OK);
+    Command two = make_command("probe_2");
+    two.command_id = 2;
+    CHECK(store.import_command(two) == StoreResult::OK);
+    CHECK(store.restore_commit(REVISION_MAX - 1) == StoreResult::OK);
+    CHECK(store.revision() == REVISION_MAX);
+
+    // clear_all is refused at the ceiling, so reach a fresh restore through a factory reset.
+    CHECK(store.factory_reset() == StoreResult::OK);
+    CHECK(store.restore_begin(bridge, 4) == StoreResult::OK);
+    CHECK(store.import_command(two) == StoreResult::OK);
+    // A modest source revision commits normally again, so the ceiling is a property of the values
+    // involved rather than a latch.
+    CHECK(store.restore_commit(14) == StoreResult::OK);
+    CHECK(store.revision() == 15);
+  }
 }
 
 void test_store_full_and_budget() {
@@ -969,7 +1172,7 @@ void test_corrupt_payload_is_read_only() {
   CHECK(store.clear_all() == StoreResult::READ_ONLY);
   CHECK(store.restore_begin(bridge, 9) == StoreResult::READ_ONLY);
   CHECK(store.import_command(imported) == StoreResult::READ_ONLY);
-  CHECK(store.restore_commit() == StoreResult::READ_ONLY);
+  CHECK(store.restore_commit(0) == StoreResult::READ_ONLY);
   CHECK(backend.writes == writes_before);
   CHECK(backend.records == untouched);
 
@@ -1160,7 +1363,7 @@ void test_factory_reset_is_the_only_escape_from_read_only() {
   CHECK(store.clear_all() == StoreResult::READ_ONLY);
   CHECK(store.restore_begin(bridge, 4) == StoreResult::READ_ONLY);
   CHECK(store.import_command(imported) == StoreResult::READ_ONLY);
-  CHECK(store.restore_commit() == StoreResult::READ_ONLY);
+  CHECK(store.restore_commit(0) == StoreResult::READ_ONLY);
   CHECK(backend.records == untouched);
   CHECK(backend.writes == 0);
 
@@ -1300,7 +1503,7 @@ void test_read_only_refuses_every_mutation() {
   Command imported = make_command("imported");
   imported.command_id = 1;
   CHECK(store.import_command(imported) == StoreResult::READ_ONLY);
-  CHECK(store.restore_commit() == StoreResult::READ_ONLY);
+  CHECK(store.restore_commit(0) == StoreResult::READ_ONLY);
 
   // Not one byte moved.
   CHECK(backend.writes == writes_before);
@@ -1465,6 +1668,10 @@ int main() {
   test_restore_flow();
   test_restore_in_progress_blocks_normal_mutations();
   test_interrupted_restore_is_visible();
+  test_restore_revision_continues_the_logical_sequence();
+  test_restore_after_clear_does_not_reuse_a_revision();
+  test_interrupted_restore_exposes_no_committed_revision();
+  test_revision_ceiling_is_refused_not_wrapped();
   test_store_full_and_budget();
   test_store_rejects_bad_names();
   test_corrupt_payload_is_read_only();

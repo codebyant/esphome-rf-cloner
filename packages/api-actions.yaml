@@ -45,6 +45,16 @@ api:
             id: ${rf_cloner_id}
             name: !lambda "return name;"
 
+    # Deleting by immutable id, so a caller holding one is unaffected by an intervening rename.
+    # Preferred over ${rf_action_prefix}delete wherever the caller tracks commands by id.
+    - action: ${rf_action_prefix}delete_id
+      variables:
+        command_id: int
+      then:
+        - rf_cloner.delete_id:
+            id: ${rf_cloner_id}
+            command_id: !lambda "return command_id;"
+
     - action: ${rf_action_prefix}cancel
       then:
         - rf_cloner.cancel: ${rf_cloner_id}
@@ -173,10 +183,17 @@ api:
             id(${rf_cloner_id}).import_command(command_id, name, pulses, gap_us, repeat_times, frequency_hz,
                                                modulation);
 
+    # `source_revision` is the revision the registry had on the bridge this restore came from.
+    # The device does not keep it on flash, so the restorer supplies it and the committed revision
+    # continues that sequence. Without it a restored bridge would restart its revision numbering
+    # and could republish a revision a reader had already seen, making revision useless as a change
+    # token. Pass 0 if no source revision is known.
     - action: ${rf_action_prefix}restore_commit
+      variables:
+        source_revision: int
       then:
         - lambda: |-
-            id(${rf_cloner_id}).restore_commit();
+            id(${rf_cloner_id}).restore_commit(source_revision);
 
     # Superseded by rf_status; kept for existing standalone scripts.
     - action: ${rf_action_prefix}list

@@ -46,6 +46,9 @@ RenameAction = rf_cloner_ns.class_(
 DeleteAction = rf_cloner_ns.class_(
     "DeleteAction", automation.Action, cg.Parented.template(RfCloner)
 )
+DeleteByIdAction = rf_cloner_ns.class_(
+    "DeleteByIdAction", automation.Action, cg.Parented.template(RfCloner)
+)
 ClearAllAction = rf_cloner_ns.class_(
     "ClearAllAction", automation.Action, cg.Parented.template(RfCloner)
 )
@@ -344,6 +347,16 @@ async def rf_cloner_delete_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     await cg.register_parented(var, config[CONF_ID])
     cg.add(var.set_name(await cg.templatable(config[CONF_NAME], args, cg.std_string)))
+    return var
+
+
+@automation.register_action(
+    "rf_cloner.delete_id", DeleteByIdAction, ID_ACTION_SCHEMA, synchronous=True
+)
+async def rf_cloner_delete_id_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_command_id(await cg.templatable(config[CONF_COMMAND_ID], args, cg.uint32)))
     return var
 
 
