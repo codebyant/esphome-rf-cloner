@@ -1,4 +1,8 @@
-# Reference configuration for the RF learning bridge.
+# Reference configuration for the RF learning bridge, built from a clone of this repository.
+#
+# If you are installing RF Cloner rather than working on it, use config/rf-bridge-remote.yaml
+# instead: it is the same configuration with the component and packages pulled from GitHub, so
+# there is nothing to clone.
 #
 # Learn a command by name, store it on the device, and replay it later - no recompile per
 # command. Requires ESPHome >= 2026.1 and the rf_cloner component in ../components.
@@ -23,6 +27,9 @@ packages:
     file: ../packages/controls.yaml
     vars:
       rf_cloner_id: cloner
+      # "true" keeps these controls on the device's web page and out of Home Assistant, for when
+      # the Home Assistant integration provides the management UI instead.
+      rf_hide_in_ha: "false"
   rf_actions: !include
     file: ../packages/api-actions.yaml
     vars:

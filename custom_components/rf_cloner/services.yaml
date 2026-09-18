@@ -7,7 +7,7 @@ learn:
           integration: rf_cloner
     name:
       required: true
-      example: fan_speed_up
+      example: shutter_up
       selector:
         text:
 

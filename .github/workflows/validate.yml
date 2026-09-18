@@ -1,0 +1,38 @@
+# Validates the Home Assistant integration the way Home Assistant and HACS validate it.
+#
+# Neither job installs Home Assistant or ESPHome: hassfest and the HACS action both run as
+# containers that carry their own copy, which keeps this cheap enough to run on every push.
+
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Both tools validate against a moving target, so a daily run catches a requirement that
+    # changed upstream rather than one we introduced.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  hassfest:
+    name: hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hacs/action@main
+        with:
+          category: integration
+          # `brands` checks for an icon in home-assistant/brands, which only accepts integrations
+          # that are already distributed. Drop this once the brands pull request is merged.
+          ignore: brands

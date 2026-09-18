@@ -1,5 +1,14 @@
 # Troubleshooting
 
+Two halves, in two parts: [the bridge](#the-bridge) first, then
+[the Home Assistant integration](#home-assistant-integration). Almost everything RF-related is in
+the first part - if a command will not learn or will not drive its target, the integration is not
+involved.
+
+---
+
+# The bridge
+
 ## The CC1101 is not detected
 
 The boot log should contain `CC1101 found! Chip ID: 0x0014`. A chip ID of `0xFF0F`, `0x0000` or
@@ -129,3 +138,88 @@ lower `max_pulses`, or delete commands. `dump_config` prints current and worst-c
 stale driver handle. Unplug and replug the USB cable.
 
 Note that starting `esphome logs` over serial resets the device.
+
+---
+
+# Home Assistant integration
+
+## The integration cannot be added
+
+**"That node exposes no rf_cloner actions."** The node is not running
+[`packages/api-actions.yaml`](../packages/api-actions.yaml), or is disconnected. ESPHome registers
+a node's actions on connect and withdraws them on disconnect, so a node that is offline looks
+identical to one without the package. Check the node is connected first, then check the package is
+included and the build is current.
+
+**"The node did not answer."** The actions exist but `rf_status` did not return. Usually the node
+dropped off mid-flow; retry.
+
+**The ESPHome node is not in the picker.** The picker lists ESPHome config entries. If the node is
+not adopted by Home Assistant yet, adopt it in the ordinary way first.
+
+**Setup fails on an older Home Assistant.** The integration needs **2026.8 or newer**, which is
+where the device registry gained the API it uses to link the bridge to its ESPHome node.
+
+## Commands do not appear, or do not go away
+
+The integration polls roughly every 30 seconds, so a change made on the device's own web page can
+take that long to surface. Changes made in Home Assistant appear at once.
+
+If a command never appears:
+
+- Is **Read-only storage** on? Nothing can be written. See above.
+- Is **Unfinished restore** on? Normal mutations are refused until the restore is repeated or the
+  bridge is cleared.
+- Does `rf_status` list it? Call `esphome.<node>_rf_status` in Developer Tools. If the device does
+  not list it, the problem is device-side and this page's first half applies.
+
+If a deleted command comes back, the device refused the delete. The integration deliberately lets
+the next poll reinstate it rather than showing a command as gone in Home Assistant while it is
+still stored on the bridge.
+
+## Everything is unavailable
+
+The bridge's entities go unavailable when the node's actions are not callable — the ESPHome entry
+is gone, unloaded, or the node is disconnected. There is no separate connection to check: fix the
+ESPHome node and the bridge follows.
+
+## The bridge reports the wrong identity
+
+The log says:
+
+```
+Bridge at <title> reports identity <x> but this entry is <y>;
+leaving the stored commands untouched so they can be restored
+```
+
+The hardware in front of Home Assistant is not the logical bridge this entry represents — it was
+replaced, or factory-reset. Reconciliation freezes on purpose and the snapshot is left alone, so
+there is something to restore from. Use **Reconfigure** on the config entry:
+[backup-and-replacement.md](backup-and-replacement.md).
+
+Do **not** delete the config entry and add a fresh one. That discards the snapshot, and with it
+the only copy of the waveforms.
+
+## A restore is refused
+
+The reason is shown in the dialogue:
+
+| Reason | Fix |
+|---|---|
+| *the target is in read-only mode* | `rf_factory_reset` the replacement, then retry |
+| *the target already has an unfinished restore* | Retry the restore, or clear the replacement |
+| *the target already holds N command(s)* | Clear the replacement first |
+| *the target holds N commands and the snapshot has M* | Raise `max_commands` on the replacement |
+| *the target's N-pulse limit cannot hold: …* | Raise `max_pulses` on the replacement |
+| *There is no snapshot to restore* | Home Assistant never read a complete registry from the original. Nothing can be done now; the copy does not exist |
+
+## Getting diagnostics
+
+The bridge's device page has **Download diagnostics** — attach it to any issue. For logs, raise the
+integration's level in `configuration.yaml`:
+
+```yaml
+logger:
+  logs:
+    custom_components.rf_cloner: debug
+```

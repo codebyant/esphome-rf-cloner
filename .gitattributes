@@ -1,0 +1,9 @@
+# Normalise line endings, so a checkout on Windows cannot commit CRLF into files that are read on
+# Linux. The shell test runners are the reason this file exists: `sh tests/run.sh` on Ubuntu CI
+# fails with `$'\r': command not found` if run.sh ever lands with CRLF.
+* text=auto eol=lf
+
+# Never rewritten.
+*.png binary
+*.jpg binary
+*.bin binary

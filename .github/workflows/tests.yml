@@ -1,0 +1,69 @@
+# The two host test suites, which between them need nothing but a compiler and a Python
+# interpreter: the firmware tests exclude ESPHome, and the integration tests stub the handful of
+# Home Assistant types they borrow. Neither needs radio hardware.
+
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  firmware:
+    name: Firmware (C++)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run the host tests
+        run: sh tests/run.sh
+
+  integration:
+    name: Integration (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          # The integration uses PEP 695 type aliases, so it needs 3.12 at the least. Home
+          # Assistant 2026.8 itself runs on 3.13.
+          python-version: "3.13"
+      - name: Byte-compile the integration
+        # Catches a syntax error anywhere in the component, including the modules the suites
+        # below do not import.
+        run: python -m compileall -q custom_components/rf_cloner components/rf_cloner
+      - name: Run the host tests
+        run: sh tests/run_python.sh
+
+  translations:
+    name: Translations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: strings.json and translations/en.json must agree
+        # en.json is the English translation of strings.json, so any key present in one and
+        # missing from the other is an untranslated string waiting to surface in the UI.
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+
+          root = pathlib.Path("custom_components/rf_cloner")
+
+
+          def keys(value, prefix=""):
+              if not isinstance(value, dict):
+                  return {prefix}
+              return {k for name, item in value.items() for k in keys(item, f"{prefix}.{name}")}
+
+
+          source = keys(json.loads((root / "strings.json").read_text()))
+          english = keys(json.loads((root / "translations/en.json").read_text()))
+          if missing := source - english:
+              print("Missing from translations/en.json:", *sorted(missing), sep="\n  ")
+          if extra := english - source:
+              print("Not in strings.json:", *sorted(extra), sep="\n  ")
+          sys.exit(1 if missing or extra else 0)
+          PY

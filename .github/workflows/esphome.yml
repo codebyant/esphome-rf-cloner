@@ -1,0 +1,86 @@
+# Validates the ESPHome side: the component's own configuration schema and code generation, which
+# no host test reaches.
+#
+# `esphome config` runs the component's Python and expands the packages, but stops before the
+# toolchain, so this costs a pip install rather than a firmware build. It is scoped to the files
+# that can break it, because installing ESPHome is by far the most expensive thing in this
+# repository's CI.
+
+name: ESPHome
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "components/**"
+      - "config/**"
+      - "packages/**"
+      - ".github/workflows/esphome.yml"
+  pull_request:
+    paths:
+      - "components/**"
+      - "config/**"
+      - "packages/**"
+      - ".github/workflows/esphome.yml"
+  schedule:
+    # For the published-install-path job below, which validates against the default branch rather
+    # than against the commit under test.
+    - cron: "30 4 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  config:
+    name: Validate configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install ESPHome
+        run: pip install esphome
+      - name: Provide the secrets the reference configurations expect
+        # Throwaway values, generated per run so nothing key-shaped is ever committed here. The
+        # configurations only need the keys to resolve; validation never opens a connection.
+        run: |
+          {
+            echo "wifi_ssid: ci"
+            echo "wifi_password: ci-password"
+            echo "api_key: \"$(openssl rand -base64 32)\""
+          } > config/secrets.yaml
+      - name: Validate the reference bridge
+        run: esphome config config/rf-bridge.yaml
+      - name: Validate the hardware check
+        run: esphome config config/hardware-check.yaml
+
+  published:
+    name: Published install path
+    # config/rf-bridge-remote.yaml resolves the component and the packages from GitHub, so it
+    # exercises whatever is on the default branch and not the commit under test. Running it on a
+    # pull request would validate the wrong code and report the wrong result, so it runs on the
+    # branch itself and weekly - enough to notice that the documented `github://` path has stopped
+    # resolving.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install ESPHome
+        run: pip install esphome
+      - name: Provide the secrets the reference configurations expect
+        # Throwaway values, generated per run so nothing key-shaped is ever committed here. The
+        # configurations only need the keys to resolve; validation never opens a connection.
+        run: |
+          {
+            echo "wifi_ssid: ci"
+            echo "wifi_password: ci-password"
+            echo "api_key: \"$(openssl rand -base64 32)\""
+          } > config/secrets.yaml
+      - name: Validate the configuration users are told to copy
+        run: esphome config config/rf-bridge-remote.yaml

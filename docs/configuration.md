@@ -3,7 +3,10 @@
 Every option, action, trigger and entity of the `rf_cloner` component. For how it works, see
 [architecture.md](architecture.md); for wiring and capture tuning, [hardware.md](hardware.md).
 
-A complete working configuration is [`config/rf-bridge.yaml`](../config/rf-bridge.yaml).
+A complete working configuration is
+[`config/rf-bridge-remote.yaml`](../config/rf-bridge-remote.yaml), which pulls this component and
+its packages from GitHub. [`config/rf-bridge.yaml`](../config/rf-bridge.yaml) is the same thing
+with local paths, for working on the component itself.
 
 ```yaml
 external_components:
@@ -322,9 +325,12 @@ sensor:
 
 `captured` and `failed` persist until the next learn, so the outcome stays visible.
 
-There are no per-command entities: ESPHome cannot create entities at runtime. Pair these with a
-`template.text` for the command name and `template.button`s for learn, send and delete, as in the
-reference configuration.
+There are no per-command ESPHome entities: ESPHome cannot create entities at runtime. Pair these
+with a `template.text` for the command name and `template.button`s for learn, send and delete, as
+[`packages/controls.yaml`](../packages/controls.yaml) does.
+
+The Home Assistant integration does create one button entity per command, on its own side - see
+[home-assistant.md](home-assistant.md).
 
 ## Failure behaviour
 

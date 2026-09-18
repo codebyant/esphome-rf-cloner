@@ -1,0 +1,129 @@
+# RF Cloner bridge, pulled straight from GitHub.
+#
+# This is the file to copy into your own ESPHome directory. Nothing is cloned: the component and
+# the packages are fetched from the repository at compile time. Adjust the pins and the radio for
+# your board, put `wifi_ssid`, `wifi_password` and `api_key` in your ESPHome secrets, and flash.
+#
+# Verify the wiring with config/hardware-check.yaml first - see docs/hardware.md.
+#
+# `@main` tracks the default branch. Pin it to a release tag on every `source:` and `ref:` below
+# once you have a version you are happy with, so a firmware rebuild cannot pick up a change you
+# did not ask for.
+
+substitutions:
+  name: rf-bridge
+  friendly_name: RF Bridge
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    # The radio must be listening once setup completes.
+    priority: -100
+    then:
+      - cc1101.begin_rx: cc1101_radio
+
+external_components:
+  - source: github://codebyant/esphome-rf-cloner@main
+    components: [rf_cloner]
+
+packages:
+  rf_cloner:
+    url: https://github.com/codebyant/esphome-rf-cloner
+    ref: main
+    refresh: 1d
+    files:
+      # Home Assistant actions. Required by the Home Assistant integration, which speaks to the
+      # bridge through them and through nothing else.
+      - path: packages/api-actions.yaml
+        vars:
+          rf_cloner_id: cloner
+      # On-device controls: a name field and learn/send/delete buttons, which keep the bridge
+      # manageable from its own web page with Home Assistant offline.
+      #
+      # If you use the Home Assistant integration, these five entities duplicate what it already
+      # offers. Set `rf_hide_in_ha: "true"` to keep them on the device's web page and out of Home
+      # Assistant, or drop this file entirely.
+      - path: packages/controls.yaml
+        vars:
+          rf_cloner_id: cloner
+          rf_hide_in_ha: "false"
+
+esp32:
+  variant: esp32
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+logger:
+
+# Required by the Home Assistant integration.
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# Local control page, so learned commands stay replayable with Home Assistant offline.
+web_server:
+  port: 80
+
+# Radio. Any GPIO will do; these are simply the pins docs/hardware.md wires up.
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+
+cc1101:
+  id: cc1101_radio
+  cs_pin: GPIO5
+  # Match your CC1101 module's band and your target's carrier.
+  frequency: 433.92MHz
+  modulation_type: ASK/OOK
+  output_power: 10
+  symbol_rate: 5000
+  filter_bandwidth: 203kHz
+
+# GDO2 -> receive
+remote_receiver:
+  id: rf_rx
+  pin: GPIO4
+  # Below the shortest pulse your remote emits.
+  filter: 100us
+  # Above your remote's inter-frame gap and below the pause between separate button presses, so a
+  # capture window holds several repeats and the gap can be measured off the waveform rather than
+  # inferred. Capped at 65536 us by the ESP32's RMT. See docs/hardware.md.
+  idle: 30ms
+  buffer_size: 10kB
+
+# GDO0 -> transmit
+remote_transmitter:
+  id: rf_tx
+  pin: GPIO22
+  # Required for RF: the CC1101 does the modulation itself.
+  carrier_duty_percent: 100%
+  # A repeated replay occupies the air for most of a second.
+  non_blocking: true
+  on_transmit:
+    then:
+      - cc1101.begin_tx: cc1101_radio
+  on_complete:
+    then:
+      - cc1101.begin_rx: cc1101_radio
+
+rf_cloner:
+  id: cloner
+  receiver_id: rf_rx
+  transmitter_id: rf_tx
+  max_commands: 16
+  max_pulses: 128
+  max_storage_bytes: 12288
+  # Replay defaults, overridable per command.
+  default_repeat_times: 20
+  default_gap: 10ms

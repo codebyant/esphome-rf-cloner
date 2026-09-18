@@ -4,6 +4,11 @@
 # compile time. These static controls act on any command by name instead, and render in both Home
 # Assistant and ESPHome's built-in web server.
 #
+# The Home Assistant integration offers all of this natively, with one button per command and no
+# name field to fill in. If you use it, set `rf_hide_in_ha: "true"` to keep these controls on the
+# device's own web page - where they remain the fallback when Home Assistant is down - and out of
+# Home Assistant, where they would only duplicate it.
+#
 #   packages:
 #     rf_controls: !include
 #       file: packages/controls.yaml
@@ -26,11 +31,15 @@ defaults:
   rf_name_id: rf_command_name
   # prepended to every entity name, e.g. "Garage " -> "Garage Learn command"
   rf_prefix: ""
+  # "true" registers these entities in Home Assistant disabled. They keep working on the device's
+  # own web page. Set it when the Home Assistant integration already provides the management UI.
+  rf_hide_in_ha: "false"
 
 text:
   - platform: template
     id: ${rf_name_id}
     name: "${rf_prefix}Command name"
+    disabled_by_default: ${rf_hide_in_ha}
     optimistic: true
     restore_value: true
     mode: text
@@ -43,6 +52,7 @@ button:
   - platform: template
     name: "${rf_prefix}Learn command"
     icon: mdi:radio-tower
+    disabled_by_default: ${rf_hide_in_ha}
     on_press:
       - rf_cloner.learn:
           id: ${rf_cloner_id}
@@ -51,6 +61,7 @@ button:
   - platform: template
     name: "${rf_prefix}Send command"
     icon: mdi:send
+    disabled_by_default: ${rf_hide_in_ha}
     on_press:
       - rf_cloner.send:
           id: ${rf_cloner_id}
@@ -60,6 +71,7 @@ button:
     name: "${rf_prefix}Delete command"
     icon: mdi:delete
     entity_category: config
+    disabled_by_default: ${rf_hide_in_ha}
     on_press:
       - rf_cloner.delete:
           id: ${rf_cloner_id}
@@ -69,6 +81,7 @@ button:
     name: "${rf_prefix}Cancel learning"
     icon: mdi:cancel
     entity_category: config
+    disabled_by_default: ${rf_hide_in_ha}
     on_press:
       - rf_cloner.cancel: ${rf_cloner_id}
 
@@ -77,13 +90,17 @@ text_sensor:
     rf_cloner_id: ${rf_cloner_id}
     state:
       name: "${rf_prefix}Learn state"
+      disabled_by_default: ${rf_hide_in_ha}
     last_result:
       name: "${rf_prefix}Last result"
+      disabled_by_default: ${rf_hide_in_ha}
 
 sensor:
   - platform: rf_cloner
     rf_cloner_id: ${rf_cloner_id}
     command_count:
       name: "${rf_prefix}Stored commands"
+      disabled_by_default: ${rf_hide_in_ha}
     storage_used:
       name: "${rf_prefix}Storage used"
+      disabled_by_default: ${rf_hide_in_ha}

@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest something the project should do.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        RF Cloner learns and replays fixed-code sub-GHz remote commands. Decoding protocols,
+        rolling-code targets and IR are out of scope — see the non-goals in
+        [CONTRIBUTING.md](https://github.com/codebyant/esphome-rf-cloner/blob/main/CONTRIBUTING.md).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that the project makes hard or impossible?
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: Optional. A shape for the solution, if you have one.

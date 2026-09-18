@@ -1,0 +1,74 @@
+name: Bug report
+description: Something does not behave the way it is documented to.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: [docs/troubleshooting.md](https://github.com/codebyant/esphome-rf-cloner/blob/main/docs/troubleshooting.md)
+        covers most reported problems, including learning that times out, commands that are learned
+        but do not drive the target, and a bridge that boots read-only.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where does it happen?
+      options:
+        - The ESPHome component (learning, storage, replay)
+        - The Home Assistant integration (setup, buttons, rename, delete, restore)
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: RF Cloner, ESPHome, and Home Assistant if the integration is involved.
+      placeholder: "RF Cloner 0.1.0, ESPHome 2026.9.0, Home Assistant 2026.9.1"
+    validations:
+      required: true
+
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: ESP32 variant and CC1101 module, or whatever front-end you are using.
+      placeholder: ESP32-WROOM-32 + CC1101 433 MHz with SMA antenna
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        For the component, `esphome logs` at `DEBUG`, including the boot lines that report what
+        storage was found. For the integration, the Home Assistant log with
+        `custom_components.rf_cloner` at `debug`.
+      render: text
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: |
+        If the Home Assistant integration is involved: the bridge device page has a **Download
+        diagnostics** button. It carries no waveforms, credentials or unrelated configuration.
+      render: json
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: The relevant part of your ESPHome YAML, with secrets removed.
+      render: yaml

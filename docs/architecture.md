@@ -8,6 +8,10 @@ ESPHome already provides the radio driver (`cc1101`), raw capture and replay (`r
 `radio_frequency` transmitter entity domain. Neither provides RF *learning* or a store for learned
 codes. This component is that layer and nothing more.
 
+This page is about the component. The Home Assistant integration that manages it is a separate
+piece with its own contract - see [home-assistant.md](home-assistant.md) and
+[backup-and-replacement.md](backup-and-replacement.md).
+
 ```
 remote_receiver ──on_receive──▶ RfCloner ──transmit──▶ remote_transmitter
                                    │
@@ -226,6 +230,15 @@ registry identity, counters and one object per command via `supports_response: o
 A `select` listing stored names is deliberately not used: ESPHome sends a select's option list
 only in `ListEntities`, so it would be correct at boot and stale thereafter.
 
+### Per-command entities
+
+The compile-time limit is ESPHome's, not Home Assistant's. The `rf_cloner` Home Assistant
+integration in [`custom_components/`](../custom_components/rf_cloner) creates one button entity per
+learned command at runtime, driven by `rf_status` and keyed by each command's immutable id. It
+does that through Home Assistant's existing ESPHome connection, calling the same
+`api: actions:` above, so the device's contract is unchanged: the registry still lives on the
+device and replay still works with Home Assistant offline.
+
 ## Design decisions
 
 ### The device owns the store
@@ -261,7 +274,8 @@ conflict with it.
 
 - **Rolling-code devices cannot be controlled by replay.** Any device whose transmission changes
   between presses is outside what a raw learn-and-replay bridge can do.
-- **Learned commands are not individual entities**, for the reason above.
+- **Learned commands are not individual ESPHome entities**, for the reason above. The Home
+  Assistant integration creates them on its side instead.
 - **Storage is bounded** by the NVS partition, around 20 kB in ESPHome's default layout.
 - **One frequency per component instance.** `frequency` is recorded with each command as metadata
   but does not retune the radio at replay time.
