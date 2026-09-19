@@ -12,6 +12,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-18
+
 ### RF devices
 
 - Learned commands can be grouped under **RF devices**: one Home Assistant device per piece of
@@ -48,6 +50,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - A command deleted on the bridge itself now has its entity registry record removed with it,
   instead of leaving an orphaned record holding on to its entity id.
+- An RF device's area field is pre-filled from where its Home Assistant device actually is, rather
+  than from the area stored when the device was created. Those differ as soon as you move the
+  device yourself, and choosing an area is now applied instead of being mistaken for no change.
 
 ### Testing
 
@@ -111,5 +116,6 @@ First public release.
 - Home Assistant's snapshot is a faithful mirror of the device, not an undo buffer for a
   destructive action you asked for.
 
-[Unreleased]: https://github.com/codebyant/esphome-rf-cloner/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/codebyant/esphome-rf-cloner/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/codebyant/esphome-rf-cloner/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/codebyant/esphome-rf-cloner/releases/tag/v0.1.0

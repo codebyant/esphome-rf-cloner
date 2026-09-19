@@ -34,7 +34,7 @@ body:
     attributes:
       label: Versions
       description: RF Cloner, ESPHome, and Home Assistant if the integration is involved.
-      placeholder: "RF Cloner 0.1.0, ESPHome 2026.9.0, Home Assistant 2026.9.1"
+      placeholder: "RF Cloner 0.2.0, ESPHome 2026.9.0, Home Assistant 2026.9.1"
     validations:
       required: true
 
