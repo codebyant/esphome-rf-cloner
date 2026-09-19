@@ -9,3 +9,4 @@ tests/test_rf_cloner.exe
 tests/*.o
 tests/*.log
 .env
+.pytest_cache/

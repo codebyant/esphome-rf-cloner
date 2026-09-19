@@ -27,7 +27,7 @@
       },
       "replace": {
         "title": "Restore onto replacement hardware",
-        "description": "This node is empty and reports a different identity ({found_bridge_id}). Restoring writes {commands} command(s) back onto it as bridge {bridge_id}, keeping every command id so your dashboards and automations keep working."
+        "description": "This node is empty and reports a different identity ({found_bridge_id}). Restoring writes {commands} command(s) back onto it as bridge {bridge_id}, keeping every command id so your dashboards and automations keep working. Your RF devices and the commands assigned to them are kept as they are."
       }
     },
     "error": {
@@ -45,53 +45,140 @@
       "restore_failed": "The restore did not complete: {detail}."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "RF commands",
+        "description": "Learn a new command, or change one this bridge already has.",
+        "menu_options": {
+          "learn_command": "Learn a command",
+          "manage_command": "Edit or delete a command"
+        }
+      },
+      "learn_command": {
+        "title": "Learn a command",
+        "description": "Name the command and choose the RF device it belongs to, then hold the button on your remote when asked. Letters, digits, underscore, hyphen and full stop only, up to 23 characters.",
+        "data": {
+          "name": "Name",
+          "target_id": "RF device",
+          "icon": "Icon"
+        },
+        "data_description": {
+          "name": "Stored on the bridge, so it is also what the bridge's own web page shows.",
+          "target_id": "Which piece of equipment this command drives. Leave it unassigned if you would rather not group it.",
+          "icon": "Optional. Left empty, one is suggested from the name and the device type."
+        }
+      },
+      "manage_command": {
+        "title": "Choose a command",
+        "description": "Pick the command to edit or delete. The RF device it currently belongs to is shown in brackets.",
+        "data": {
+          "command_id": "Command"
+        }
+      },
+      "command": {
+        "title": "Edit {name}",
+        "description": "Renaming changes the name stored on the bridge. Changing the RF device or the icon changes nothing on the bridge: the command keeps its identity, its waveform and its history either way.",
+        "data": {
+          "name": "Name",
+          "target_id": "RF device",
+          "icon": "Icon",
+          "delete": "Delete this command from the bridge"
+        },
+        "data_description": {
+          "name": "Letters, digits, underscore, hyphen and full stop only, up to 23 characters.",
+          "target_id": "Move the command to another RF device, or to Unassigned.",
+          "icon": "An icon you set on the entity itself takes precedence over this one.",
+          "delete": "Tick to go on to a confirmation. Nothing is deleted from this screen."
+        }
+      },
+      "confirm_delete": {
+        "title": "Delete {name}?",
+        "description": "This erases the command \"{name}\" from the bridge, waveform and all. It cannot be undone, and only a snapshot restore would bring it back. The button and its history are removed with it.\n\nRemoving an RF device does none of this: it only ungroups its commands."
+      }
+    },
+    "error": {
+      "name_empty": "Enter a name.",
+      "name_too_long": "That name is longer than 23 characters.",
+      "name_invalid": "Use only letters, digits, underscore, hyphen and full stop.",
+      "name_taken": "This bridge already has a command with that name.",
+      "rename_failed": "The bridge refused the rename."
+    },
+    "progress": {
+      "learning": "Press and hold the button on your remote now to teach it \"{name}\"."
+    },
+    "abort": {
+      "not_loaded": "The bridge is not ready yet. Try again once it has connected.",
+      "not_writable": "The bridge is not accepting changes right now.",
+      "registry_full": "The bridge has no free command slots left.",
+      "no_commands": "This bridge has not learned any commands yet.",
+      "unknown_command": "That command is no longer on the bridge.",
+      "learn_failed": "Nothing was learned: {detail}.",
+      "learned": "Learned \"{name}\" and assigned it to {target}.",
+      "command_saved": "The command was updated.",
+      "command_deleted": "\"{name}\" was deleted from the bridge.",
+      "delete_failed": "The command was not deleted: {detail}."
+    }
+  },
   "config_subentries": {
-    "command": {
-      "entry_type": "RF command",
+    "target": {
+      "entry_type": "RF device",
       "initiate_flow": {
-        "user": "Learn a command",
-        "reconfigure": "Rename command"
+        "user": "Add an RF device",
+        "reconfigure": "Edit RF device"
       },
       "step": {
         "user": {
-          "title": "Learn a command",
-          "description": "Name the command, then hold the button on your remote when asked. Letters, digits, underscore, hyphen and full stop only, up to 23 characters.",
+          "title": "Add an RF device",
+          "description": "Describe the equipment this bridge drives - a ceiling fan, a gate, a projector. Its commands then appear together, as one device in Home Assistant.",
           "data": {
-            "name": "Name"
+            "name": "Name",
+            "target_type": "Type",
+            "area_id": "Area"
           },
           "data_description": {
-            "name": "Stored on the device, so it is also what the bridge's own web page shows."
+            "name": "What you call the equipment, for example Bedroom Fan.",
+            "target_type": "Presentation only. It suggests icons and labels; it does not add fan or cover controls.",
+            "area_id": "Where the equipment is. Applied when the device is created; you can move it afterwards."
           }
         },
         "reconfigure": {
-          "title": "Rename command",
-          "description": "Renaming changes the label only. The command keeps its identity, so entities, history and automations are unaffected.",
+          "title": "Edit RF device",
+          "description": "Renaming or retyping an RF device changes nothing on the bridge. Its commands keep their identity, their waveforms and their history.",
           "data": {
-            "name": "Name"
+            "name": "Name",
+            "target_type": "Type",
+            "area_id": "Area"
           },
           "data_description": {
-            "name": "Letters, digits, underscore, hyphen and full stop only, up to 23 characters."
+            "name": "What you call the equipment, for example Bedroom Fan.",
+            "target_type": "Presentation only. It suggests icons and labels; it does not add fan or cover controls.",
+            "area_id": "Only applied when the device is first created. A later move of your own is never overwritten."
           }
         }
       },
-      "progress": {
-        "learning": "Press and hold the button on your remote now to teach it \"{name}\"."
-      },
       "error": {
         "name_empty": "Enter a name.",
-        "name_too_long": "That name is longer than 23 characters.",
-        "name_invalid": "Use only letters, digits, underscore, hyphen and full stop.",
-        "name_taken": "This bridge already has a command with that name.",
-        "rename_failed": "The device refused the rename."
+        "target_name_taken": "This bridge already has an RF device with that name."
       },
       "abort": {
-        "not_loaded": "The bridge is not ready yet. Try again once it has connected.",
-        "not_writable": "The bridge is not accepting changes right now.",
-        "registry_full": "The bridge has no free command slots left.",
-        "unknown_command": "This command's configuration is unreadable.",
-        "learn_failed": "Nothing was learned: {detail}.",
-        "reconfigure_successful": "The command was renamed.",
-        "already_configured": "This command is already set up."
+        "unknown_target": "This RF device's configuration is unreadable.",
+        "reconfigure_successful": "The RF device was updated.",
+        "already_configured": "This RF device is already set up."
+      }
+    }
+  },
+  "selector": {
+    "target_type": {
+      "options": {
+        "generic": "Generic",
+        "fan": "Fan",
+        "gate": "Gate",
+        "light": "Light",
+        "cover": "Shutter or cover",
+        "tv": "TV",
+        "air_conditioner": "Air conditioner",
+        "other": "Other"
       }
     }
   },

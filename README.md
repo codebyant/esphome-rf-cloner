@@ -70,9 +70,13 @@ replica.
 
 - One **RF Cloner bridge device**, linked to the ESPHome node that carries it.
 - One **button entity per learned command**. Press it to replay.
-- **Learn a command** in the integration's own UI: type a name, press the remote when prompted.
-- **Rename** and **delete** through the same native UI. A rename keeps the command's identity, so
-  entities, history and automations are unaffected.
+- **RF devices**: group a piece of equipment's commands under one Home Assistant device, with a
+  type, an area and per-command icons. Grouping is Home Assistant-side only - moving a command
+  between devices never relearns it, never touches its waveform and never changes its identity.
+- **Learn a command** in the integration's own UI: type a name, pick the RF device it belongs to,
+  press the remote when prompted.
+- **Rename**, **re-icon**, **move** and **delete** through the same native UI. A rename keeps the
+  command's identity, so entities, history and automations are unaffected.
 - Diagnostic sensors for storage pressure, learn state and the last operation's result.
 - An automatic **snapshot** of every command, waveforms included, kept in Home Assistant's own
   storage.
@@ -146,8 +150,9 @@ Full walkthrough: [docs/installation.md](docs/installation.md).
 
 ### 3. Learn a command
 
-On the bridge's device page, **Learn a command**. Name it, then hold the button on the remote
-when prompted. It appears as a button entity.
+On the bridge's device page, **Configure**, then **Learn a command**. Name it, choose which RF
+device it belongs to (or leave it unassigned), then hold the button on the remote when prompted.
+It appears as a button entity under that device.
 
 ## Limitations
 

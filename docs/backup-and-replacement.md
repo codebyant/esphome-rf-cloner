@@ -38,6 +38,18 @@ The snapshot is a **faithful mirror**, not an undo buffer. Clear the bridge and,
 snapshot mirrors an empty registry too. It protects you from dead hardware, not from a destructive
 action you asked for.
 
+### What it deliberately does not hold
+
+The snapshot is the **RF registry** and nothing else. Your Home Assistant-side organisation — RF
+devices, which command belongs to which, their types, their areas and their icons — is not in it,
+and must not be: it is not RF state, it means nothing to a bridge, and a change to it should never
+cause a waveform to be re-exported.
+
+That organisation lives in the integration's config entry, which an ordinary Home Assistant backup
+already covers. The two restore independently and meet correctly: the RF snapshot brings the
+commands back under the ids they held, and the config entry still says which RF device each of
+those ids belongs to.
+
 To keep a copy outside Home Assistant:
 
 ```yaml
@@ -88,7 +100,9 @@ this payload independently of the on-flash format. `rf_status` lists the command
    Assistant offers to **restore**. Confirm.
 
 Every command is written back under its original id, and the bridge adopts the original bridge id.
-Your entities keep working.
+Your entities keep working, and so does your grouping: because entities are keyed by
+`{bridge id}_{command id}`, each restored command reappears under the RF device it was already
+assigned to, with its icon, without anything having to be re-organised.
 
 ### Why it will not do this silently
 
@@ -98,6 +112,8 @@ to follow:
 - Reconciliation **freezes**. Home Assistant does not drop the commands it mirrors just because
   the hardware in front of it has none.
 - The snapshot is **not overwritten**. The foreign device is not even read.
+- Your **RF devices and command assignments are untouched**, waiting for the restore that brings
+  their commands back.
 - The foreign identity is **not adopted**. The config entry's identity is the logical bridge's,
   not whatever the hardware currently claims.
 

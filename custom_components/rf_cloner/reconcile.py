@@ -1,63 +1,73 @@
-"""Keeps Home Assistant's command subentries in step with the device's registry.
+"""Keeps Home Assistant's view of the bridge in step with the device's registry.
 
-The device is the authority. A subentry is a local mirror of one command, so this module only
-ever follows what rf_status reported: it adopts commands it has not seen, drops mirrors whose
-command is gone, and follows renames made anywhere.
+The device is the authority for which commands exist, what they are called and what they replay.
+This module only ever follows what rf_status reported.
 
-It also turns the one gesture that flows the other way - a user deleting a subentry in the Home
-Assistant UI - into a delete on the device.
+What it maintains on the Home Assistant side is the organisation around those commands:
+
+- the set of command ids the button platform should have entities for,
+- the target devices those entities belong to,
+- and the command metadata in the entry's options, pruned of anything stale.
+
+Two gestures flow the other way, and both are organisational rather than destructive. A target
+subentry the user removed in the Home Assistant UI unassigns that target's commands; it does not
+delete them from the device. Deleting an RF command is a separate, explicit act, and lives in the
+options flow.
+
+That is a deliberate change from 0.1, where a subentry was a command and removing one deleted it.
+In 0.2 a subentry is a target - a piece of equipment - and removing a piece of equipment from
+Home Assistant is not a reason to erase waveforms from the bridge.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import logging
 import time
 
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 
-from .const import CONF_COMMAND_ID, SUBENTRY_TYPE_COMMAND
 from .coordinator import RfBridgeCoordinator
 from .models import BridgeStatus
+from .targets import options_pruned_to, targets
 
 _LOGGER = logging.getLogger(__name__)
 
-# How long a learn flow may hold a command id before the poller adopts it anyway. Covers the
-# gap between the device storing a command and the flow that learned it creating its subentry,
-# and self-heals if that flow is abandoned in between.
+# How long a learn flow may hold a command name before the poller adopts the command anyway.
+# Covers the gap between the device storing a command and the flow that learned it recording the
+# target it should land on, and self-heals if that flow is abandoned in between.
 RESERVATION_SECONDS = 60.0
 
 
-def command_unique_id(bridge_id: str, command_id: int) -> str:
-    """The stable identity of one command, used for both its subentry and its entities."""
-    return f"{bridge_id}_{command_id}"
+def command_id_from_unique_id(bridge_id: str, unique_id: str) -> int | None:
+    """The command id a unique id names, or None when it names something else.
 
-
-def subentry_command_id(subentry: ConfigSubentry) -> int | None:
-    """The command id a subentry mirrors, or None when its data is unusable."""
-    raw = subentry.data.get(CONF_COMMAND_ID)
+    The bridge's own entities are keyed the same way but with a word rather than a number, so a
+    suffix that is not an integer is what tells them apart.
+    """
+    prefix = f"{bridge_id}_"
+    if not unique_id.startswith(prefix):
+        return None
     try:
-        return int(raw)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+        return int(unique_id[len(prefix) :])
+    except ValueError:
         return None
 
 
-@callback
-def command_subentries(entry: ConfigEntry) -> dict[int, ConfigSubentry]:
-    """Index this entry's command subentries by the command id each mirrors."""
-    found: dict[int, ConfigSubentry] = {}
-    for subentry in entry.subentries.values():
-        if subentry.subentry_type != SUBENTRY_TYPE_COMMAND:
-            continue
-        command_id = subentry_command_id(subentry)
-        if command_id is not None:
-            found[command_id] = subentry
-    return found
+def command_unique_id(bridge_id: str, command_id: int) -> str:
+    """The stable identity of one command's entities.
+
+    Unchanged since 0.1, and it has to stay that way: it is what keeps a user's dashboards,
+    automations and history pointing at the same button across upgrades, renames, target moves
+    and hardware replacement.
+    """
+    return f"{bridge_id}_{command_id}"
 
 
 class CommandReconciler:
-    """Mirrors the device's command list into config subentries."""
+    """Mirrors the device's command list into Home Assistant's organisation."""
 
     def __init__(
         self,
@@ -69,39 +79,48 @@ class CommandReconciler:
         self._hass = hass
         self._entry = entry
         self._coordinator = coordinator
-        # Subentry ids this object removed itself. A removal the device already told us about must
-        # not be echoed back to the device as a delete.
-        self._removed_by_us: set[str] = set()
-        # Command id per subentry id, as of the last time we looked. A subentry that disappears
-        # from this map without us removing it was removed by the user, and that is the one case
-        # where Home Assistant mutates the device.
-        self._mirrored: dict[str, int] = {}
-        # Command names a subentry flow is about to claim, with the time each claim lapses.
+        # Command names a learn flow is about to claim, with the time each claim lapses.
         self._reserved: dict[str, float] = {}
-        # Only while this is set does a vanished subentry mean the user deleted a command.
-        # It is off for the whole of setup and from the first moment of teardown, so no
-        # lifecycle event can be mistaken for a deletion.
         self._active = False
         self._identity_mismatch = False
+        # Called when the set of commands, or where they belong, has changed. The button
+        # platform subscribes so it can add, move and drop entities.
+        self._listeners: list[Callable[[], None]] = []
+        # The target subentry ids seen at the last look, so a target the user removed can be
+        # told apart from one this integration never had.
+        self._known_targets: set[str] = set()
 
     @property
     def identity_mismatch(self) -> bool:
         """Whether the device is reporting an identity other than the one this entry adopted.
 
         True means replacement or factory-reset hardware. Reconciliation stops while it holds, so
-        the local mirror survives to be restored from.
+        the local mirror and the user's organisation both survive to be restored onto.
         """
         return self._identity_mismatch
 
     @callback
-    def async_activate(self) -> None:
-        """Start honouring user-initiated subentry removals.
+    def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """Subscribe to changes in the command set or its organisation."""
+        self._listeners.append(listener)
 
-        Called once the entry is fully set up, and only then: every subentry that exists at this
-        point is recorded as already mirrored, so nothing created during setup looks like a
-        change.
-        """
-        self.async_snapshot_mirror()
+        @callback
+        def _remove() -> None:
+            if listener in self._listeners:
+                self._listeners.remove(listener)
+
+        return _remove
+
+    @callback
+    def _async_notify(self) -> None:
+        """Tell the platforms to look again."""
+        for listener in list(self._listeners):
+            listener()
+
+    @callback
+    def async_activate(self) -> None:
+        """Start honouring user-initiated subentry removals."""
+        self.async_snapshot_targets()
         self._active = True
 
     @callback
@@ -114,19 +133,25 @@ class CommandReconciler:
         """Whether a vanished subentry can currently be attributed to the user.
 
         Both conditions matter. The flag closes the window around setup and teardown, and the
-        entry state closes the window around a reload, where the entry is briefly not loaded while
-        this object is still referenced.
+        entry state closes the window around a reload, where the entry is briefly not loaded
+        while this object is still referenced.
         """
         return self._active and self._entry.state is ConfigEntryState.LOADED
 
     @callback
-    def async_reserve(self, name: str) -> None:
-        """Claim a command name on behalf of a subentry flow that is about to learn it.
+    def async_snapshot_targets(self) -> None:
+        """Record the current target subentries, without acting on them."""
+        self._known_targets = {
+            target.subentry_id for target in targets(self._entry).values()
+        }
 
-        A subentry flow has to create its own mirror to finish. Without this claim, a poll landing
-        between the device storing the command and the flow completing would adopt it first, and
-        the flow would then fail on the duplicate identity. Claimed before the learn is armed,
-        because the command id does not exist until after it succeeds.
+    @callback
+    def async_reserve(self, name: str) -> None:
+        """Claim a command name on behalf of a learn flow that is about to capture it.
+
+        Claimed before the learn is armed, because the command id does not exist until after it
+        succeeds, and a poll landing mid-capture would otherwise materialise the command as
+        unassigned before the flow could record the target the user picked.
         """
         self._reserved[name] = time.monotonic() + RESERVATION_SECONDS
 
@@ -147,22 +172,42 @@ class CommandReconciler:
         return True
 
     @callback
-    def async_snapshot_mirror(self) -> None:
-        """Record the current subentries, without acting on them."""
-        self._mirrored = {
-            subentry.subentry_id: command_id
-            for command_id, subentry in command_subentries(self._entry).items()
+    def async_listed_commands(self, status: BridgeStatus | None = None) -> set[int] | None:
+        """Every command id the device last listed, or None when there is no usable listing.
+
+        None is not an empty set. It means the device has not been read, is mid-restore, or is
+        reporting someone else's identity - none of which is evidence that a command is gone.
+        """
+        status = status if status is not None else self._coordinator.data
+        if status is None or self._identity_mismatch or status.restore_incomplete:
+            return None
+        return {command.command_id for command in status.commands}
+
+    @callback
+    def async_visible_commands(self, status: BridgeStatus | None = None) -> set[int]:
+        """The command ids the platforms should currently have entities for.
+
+        A command a learn flow is still holding is left out, so it appears once, already on the
+        target the user chose, rather than appearing unassigned and moving a moment later.
+        """
+        status = status if status is not None else self._coordinator.data
+        if status is None or self._identity_mismatch or status.restore_incomplete:
+            return set()
+        return {
+            command.command_id
+            for command in status.commands
+            if not self._async_is_reserved(command.name)
         }
 
     @callback
     def async_reconcile(self, status: BridgeStatus) -> None:
-        """Bring the subentries in line with `status`."""
+        """Bring Home Assistant's organisation in line with `status`."""
         expected_bridge_id = self._entry.unique_id
         if expected_bridge_id is not None and status.bridge_id != expected_bridge_id:
             if not self._identity_mismatch:
                 _LOGGER.warning(
                     "Bridge at %s reports identity %s but this entry is %s; leaving the stored"
-                    " commands untouched so they can be restored",
+                    " commands and their organisation untouched so they can be restored",
                     self._entry.title,
                     status.bridge_id,
                     expected_bridge_id,
@@ -170,97 +215,87 @@ class CommandReconciler:
             self._identity_mismatch = True
             return
         self._identity_mismatch = False
-        # Proven equal to status.bridge_id by the check above; preferred because it is the
-        # identity the entities and subentries are keyed by.
-        bridge_id = expected_bridge_id or status.bridge_id
 
         if status.restore_incomplete:
             # The registry is mid-restore and its listing is not yet the final one.
             return
 
-        existing = command_subentries(self._entry)
-        reported = status.by_id
+        for command in status.commands:
+            # A flow that claimed this name has had its command materialise; the claim is spent.
+            self._reserved.pop(command.name, None)
 
-        for command_id, command in reported.items():
-            subentry = existing.get(command_id)
-            if subentry is None:
-                if not self._async_is_reserved(command.name):
-                    self._async_add(bridge_id, command_id, command.name)
-            elif subentry.title != command.name:
-                self._hass.config_entries.async_update_subentry(
-                    self._entry, subentry, title=command.name
-                )
+        listed = self.async_listed_commands(status)
+        # A command the device no longer lists is gone for good - deleted here, on the bridge's
+        # own web page, or by a script. Its entity registry record has to go with it, or the
+        # entity id it holds would be reserved forever by something that cannot come back.
+        self._async_purge_removed_commands(listed)
 
-        for command_id, subentry in existing.items():
-            reported_command = reported.get(command_id)
-            if reported_command is None:
-                self._async_remove(subentry)
-            else:
-                # The flow that claimed this name has created its mirror; the claim is spent.
-                self._reserved.pop(reported_command.name, None)
+        # Drop metadata for commands the device no longer has, and assignments to targets that
+        # no longer exist. The second is what turns a removed target's commands into unassigned
+        # ones rather than leaving them pointing at a device that is gone.
+        pruned = options_pruned_to(self._entry, listed)
+        if pruned is not None:
+            self._hass.config_entries.async_update_entry(self._entry, options=pruned)
 
-        self.async_snapshot_mirror()
+        self.async_snapshot_targets()
+        self._async_notify()
 
     @callback
-    def _async_add(self, bridge_id: str, command_id: int, name: str) -> None:
-        """Adopt a command the device has and Home Assistant does not."""
-        _LOGGER.debug("Adopting command %s (%s) from the device", command_id, name)
-        self._hass.config_entries.async_add_subentry(
-            self._entry,
-            ConfigSubentry(
-                data={CONF_COMMAND_ID: command_id},
-                subentry_type=SUBENTRY_TYPE_COMMAND,
-                title=name,
-                unique_id=command_unique_id(bridge_id, command_id),
-            ),
-        )
+    def _async_purge_removed_commands(self, listed: set[int] | None) -> None:
+        """Remove the entity registry records of commands the device no longer has.
 
-    @callback
-    def _async_remove(self, subentry: ConfigSubentry) -> None:
-        """Drop a mirror whose command the device no longer has."""
-        _LOGGER.debug("Dropping mirror of command %s; the device no longer has it", subentry.title)
-        self._removed_by_us.add(subentry.subentry_id)
-        self._hass.config_entries.async_remove_subentry(self._entry, subentry.subentry_id)
+        Only ever called with a listing the device actually produced: `listed` is None while the
+        status cannot be trusted, and treating that as "the device has nothing" would delete
+        every command's history.
+        """
+        if listed is None:
+            return
+        bridge_id = self._entry.unique_id
+        if bridge_id is None:
+            return
+        registry = er.async_get(self._hass)
+        for record in er.async_entries_for_config_entry(registry, self._entry.entry_id):
+            command_id = command_id_from_unique_id(bridge_id, record.unique_id)
+            if command_id is None or command_id in listed:
+                continue
+            _LOGGER.debug(
+                "Removing %s; the bridge no longer has command %s",
+                record.entity_id,
+                command_id,
+            )
+            registry.async_remove(record.entity_id)
 
     async def async_handle_entry_update(self) -> None:
-        """React to a subentry the user removed in the Home Assistant UI.
+        """React to a change of the entry's subentries or options.
 
-        Deleting a command is destructive and irreversible on the device, so a removal is pushed
-        through only when it can be positively attributed to the user. Three things have to hold:
-        the entry is loaded and fully set up, the removal was not one this object made while
-        following the device, and the device still reports the command. Home Assistant core never
-        removes a subentry on its own - unload, reload and entry removal all leave `subentries`
-        untouched - so anything else is treated as bookkeeping and only updates the mirror.
+        A target subentry the user removed has already taken its device and its entities with it
+        by the time this runs - Home Assistant clears a subentry's registry records before the
+        update listeners are called, and there is no hook that runs in between. So the work here
+        is to unassign that target's commands, which makes the next reconcile put their buttons
+        back as unassigned entities. Home Assistant restores an entity's id, area, name and icon
+        from its deleted record when it is re-created under the same unique id, so the buttons
+        come back as themselves.
+
+        No RF operation happens on this path. Removing a target is organisation, not deletion.
         """
         if not self._accepts_user_removals:
-            self.async_snapshot_mirror()
+            self.async_snapshot_targets()
             return
 
-        current = set(self._entry.subentries)
-        for subentry_id, command_id in list(self._mirrored.items()):
-            if subentry_id in current:
-                continue
-            if subentry_id in self._removed_by_us:
-                self._removed_by_us.discard(subentry_id)
-                self._mirrored.pop(subentry_id, None)
-                continue
-            self._mirrored.pop(subentry_id, None)
-            await self._async_delete_on_device(command_id)
-        self.async_snapshot_mirror()
+        current = {target.subentry_id for target in targets(self._entry).values()}
+        removed = self._known_targets - current
+        if removed:
+            _LOGGER.info(
+                "%s target(s) removed from %s; their commands are now unassigned and remain"
+                " stored on the bridge",
+                len(removed),
+                self._entry.title,
+            )
+        self.async_snapshot_targets()
 
-    async def _async_delete_on_device(self, command_id: int) -> None:
-        """Push a user-initiated deletion through to the device."""
-        # Re-checked here because the loop that calls this awaits between removals, and a reload
-        # or unload may have started in the meantime.
-        if not self._accepts_user_removals:
+        pruned = options_pruned_to(self._entry, self.async_listed_commands())
+        if pruned is not None:
+            self._hass.config_entries.async_update_entry(self._entry, options=pruned)
+            # The update this schedules re-enters here, finds nothing left to prune and stops.
             return
-        status = self._coordinator.data
-        command = status.by_id.get(command_id) if status else None
-        if command is None:
-            # Already gone from the device; the mirror was simply stale.
-            return
-        _LOGGER.info("Deleting command %s (%s) on the device", command_id, command.name)
-        try:
-            await self._coordinator.async_delete(command_id, command.name)
-        except HomeAssistantError as err:
-            _LOGGER.error("Could not delete command %s on the device: %s", command_id, err)
+        self._async_notify()

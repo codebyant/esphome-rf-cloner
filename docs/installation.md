@@ -128,11 +128,12 @@ If the node is rejected with *"That node exposes no rf_cloner actions"*, the nod
 
 ## 6. Learn your first command
 
-On the bridge's device page, **Learn a command**. Name it, then hold the button on the remote when
-the dialogue asks. A button entity appears under that name.
+On the bridge's device page, **Configure**, then **Learn a command**. Name it, choose which RF
+device it belongs to - or leave it unassigned - then hold the button on the remote when the
+dialogue asks. A button entity appears under that name.
 
-Details, including renaming, deleting and the automation actions:
-[home-assistant.md](home-assistant.md).
+Details, including grouping commands under RF devices, renaming, icons, deleting and the
+automation actions: [home-assistant.md](home-assistant.md).
 
 ## Upgrading
 

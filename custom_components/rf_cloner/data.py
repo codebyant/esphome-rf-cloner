@@ -20,6 +20,8 @@ class RfClonerRuntimeData:
     # hardware currently reports. The two differ exactly while a replacement is pending, and
     # entity and device identity must not follow the hardware across that window.
     bridge_id: str
+    # The bridge's own Home Assistant device, which every target device hangs off.
+    bridge_device_id: str
     transport: BridgeTransport
     coordinator: RfBridgeCoordinator
     reconciler: CommandReconciler

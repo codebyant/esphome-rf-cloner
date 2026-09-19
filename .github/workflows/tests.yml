@@ -1,6 +1,10 @@
-# The two host test suites, which between them need nothing but a compiler and a Python
-# interpreter: the firmware tests exclude ESPHome, and the integration tests stub the handful of
-# Home Assistant types they borrow. Neither needs radio hardware.
+# Three suites, none of which needs radio hardware.
+#
+# The firmware tests need only a compiler, and the logic tests only a Python interpreter - they
+# stub the handful of Home Assistant types the pure logic borrows. The Home Assistant suite is the
+# expensive one: it installs Home Assistant, because what it checks is Home Assistant's own
+# behaviour around config subentries, devices and the entity registry, which cannot be stubbed
+# without the test becoming a test of the stub.
 
 name: Tests
 
@@ -21,8 +25,8 @@ jobs:
       - name: Run the host tests
         run: sh tests/run.sh
 
-  integration:
-    name: Integration (Python)
+  logic:
+    name: Integration logic (Python)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -37,6 +41,23 @@ jobs:
         run: python -m compileall -q custom_components/rf_cloner components/rf_cloner
       - name: Run the host tests
         run: sh tests/run_python.sh
+
+  home_assistant:
+    name: Home Assistant
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          # Home Assistant 2026.8 onwards requires 3.14.2 at the least.
+          python-version: "3.14"
+      - name: Install Home Assistant
+        # Pinned to the version the integration is developed and validated against. Home
+        # Assistant's own test helpers only ship alongside a specific core version, so the two
+        # are installed as a pair.
+        run: pip install "homeassistant==2026.9.1" pytest-homeassistant-custom-component
+      - name: Run the Home Assistant tests
+        run: sh tests/run_ha.sh
 
   translations:
     name: Translations

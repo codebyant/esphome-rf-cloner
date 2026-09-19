@@ -91,6 +91,13 @@ def install() -> types.ModuleType:
             ConfigSubentry=_ConfigSubentry,
         ),
         "homeassistant.helpers": _module("homeassistant.helpers", __path__=[]),
+        "homeassistant.helpers.entity_registry": _module(
+            "homeassistant.helpers.entity_registry",
+            async_get=lambda hass: hass.entity_registry,
+            async_entries_for_config_entry=(
+                lambda registry, entry_id: registry.entries_for(entry_id)
+            ),
+        ),
         "homeassistant.helpers.storage": _module("homeassistant.helpers.storage", Store=Store),
         "homeassistant.helpers.update_coordinator": _module(
             "homeassistant.helpers.update_coordinator",
@@ -104,6 +111,9 @@ def install() -> types.ModuleType:
             parse_datetime=dt.datetime.fromisoformat,
         ),
     }
+    modules["homeassistant.helpers"].entity_registry = modules[
+        "homeassistant.helpers.entity_registry"
+    ]
     modules["homeassistant.util"].dt = modules["homeassistant.util.dt"]
     sys.modules.update(modules)
 
@@ -131,6 +141,38 @@ class _ConfigSubentry:
         self.title = title
         self.unique_id = unique_id
         self.subentry_id = subentry_id or f"sub{type(self)._counter:04d}"
+
+
+class _RegistryEntry:
+    """Stand-in for an entity registry record, with the fields the reconciler reads."""
+
+    def __init__(self, entity_id: str, unique_id: str, config_entry_id: str) -> None:
+        self.entity_id = entity_id
+        self.unique_id = unique_id
+        self.config_entry_id = config_entry_id
+
+
+class FakeEntityRegistry:
+    """Just enough entity registry to observe which records the reconciler removes."""
+
+    def __init__(self, recorder: "Recorder") -> None:
+        self.recorder = recorder
+        self.records: dict[str, _RegistryEntry] = {}
+
+    def add(self, entity_id: str, unique_id: str, config_entry_id: str) -> None:
+        """Seed a record, as a loaded platform would have."""
+        self.records[entity_id] = _RegistryEntry(entity_id, unique_id, config_entry_id)
+
+    def entries_for(self, config_entry_id: str) -> list[_RegistryEntry]:
+        return [
+            record
+            for record in self.records.values()
+            if record.config_entry_id == config_entry_id
+        ]
+
+    def async_remove(self, entity_id: str) -> None:
+        self.recorder.calls.append(("remove_entity", entity_id))
+        self.records.pop(entity_id, None)
 
 
 class Recorder:

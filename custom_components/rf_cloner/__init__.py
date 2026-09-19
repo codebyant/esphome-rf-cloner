@@ -1,10 +1,12 @@
 """The RF Cloner Bridge integration.
 
 Presents an esphome-rf-cloner bridge as a Home Assistant device whose learned RF commands appear
-as ordinary entities, and keeps a restorable replica of its registry.
+as ordinary entities, grouped under the equipment they actually drive, and keeps a restorable
+replica of its registry.
 
 The device owns the registry. Home Assistant reads it, mirrors it, and mutates it only when the
-user asks for a mutation.
+user asks for a mutation. How those commands are organised - which RF target each belongs to, and
+what icon it carries - is Home Assistant's alone, and no part of it ever reaches the device.
 """
 
 from __future__ import annotations
@@ -14,18 +16,17 @@ import logging
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryError
-from homeassistant.helpers import device_registry as dr
 
 from .const import (
     CONF_ACTION_PREFIX,
     CONF_ESPHOME_ENTRY_ID,
     DEFAULT_ACTION_PREFIX,
     DOMAIN,
-    MANUFACTURER,
-    MODEL,
 )
 from .coordinator import RfBridgeCoordinator
 from .data import RfClonerConfigEntry, RfClonerRuntimeData
+from .devices import async_register_bridge_device, async_sync_target_devices
+from .migration import async_migrate_entry  # noqa: F401  (Home Assistant looks it up here)
 from .reconcile import CommandReconciler
 from .services import async_setup_services
 from .snapshot import SnapshotManager, async_remove_snapshot
@@ -63,17 +64,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: RfClonerConfigEntry) -> 
     # replacement or factory-reset hardware - cannot drag the devices and entities with it.
     bridge_id = entry.unique_id or status.bridge_id
 
-    _async_register_bridge_device(hass, entry, esphome_entry_id, bridge_id)
+    bridge_device = async_register_bridge_device(
+        hass, entry, esphome_entry_id, bridge_id
+    )
+    # Before the platforms, so a target's device exists when its buttons are added to it - and so
+    # a target with nothing learned into it yet is still visible.
+    async_sync_target_devices(hass, entry, bridge_id, bridge_device.id)
 
     snapshots = SnapshotManager(hass, bridge_id, transport)
     await snapshots.async_load()
 
     reconciler = CommandReconciler(hass, entry, coordinator)
-    reconciler.async_snapshot_mirror()
+    reconciler.async_snapshot_targets()
     reconciler.async_reconcile(status)
 
     entry.runtime_data = RfClonerRuntimeData(
         bridge_id=bridge_id,
+        bridge_device_id=bridge_device.id,
         transport=transport,
         coordinator=coordinator,
         reconciler=reconciler,
@@ -83,7 +90,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: RfClonerConfigEntry) -> 
 
     @callback
     def _async_handle_status() -> None:
-        """Mirror every successful poll into the subentries and the replica."""
+        """Mirror every successful poll into the organisation and the replica."""
         current = coordinator.data
         if current is None:
             return
@@ -105,7 +112,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: RfClonerConfigEntry) -> 
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Only now can a subentry disappearing mean the user deleted a command.
+    # Only now can a subentry disappearing mean the user removed a target.
     reconciler.async_activate()
     # The first poll landed before the listener existed.
     _async_handle_status()
@@ -115,10 +122,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: RfClonerConfigEntry) -> 
 async def _async_entry_updated(hass: HomeAssistant, entry: RfClonerConfigEntry) -> None:
     """React to a change of the config entry.
 
-    Two kinds arrive here: a reconfigure that re-points the entry at a different node, which needs
-    a reload, and a subentry the user removed, which is a request to delete that command.
+    Three kinds arrive here: a reconfigure that re-points the entry at a different node, which
+    needs a reload; a target subentry the user added, renamed or removed; and a change to the
+    command organisation this integration wrote itself.
     """
-    runtime = entry.runtime_data
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is None:
+        return
     bound_to = (
         entry.data[CONF_ESPHOME_ENTRY_ID],
         entry.data.get(CONF_ACTION_PREFIX, DEFAULT_ACTION_PREFIX),
@@ -126,6 +136,9 @@ async def _async_entry_updated(hass: HomeAssistant, entry: RfClonerConfigEntry) 
     if bound_to != runtime.bound_to:
         hass.config_entries.async_schedule_reload(entry.entry_id)
         return
+    # Picks up targets added or renamed in the UI. Removal is the reconciler's business, and a
+    # removed target has no device left to sync.
+    async_sync_target_devices(hass, entry, runtime.bridge_id, runtime.bridge_device_id)
     await runtime.reconciler.async_handle_entry_update()
 
 
@@ -138,42 +151,3 @@ async def async_remove_entry(hass: HomeAssistant, entry: RfClonerConfigEntry) ->
     """Discard the replica along with the entry that owned it."""
     if entry.unique_id is not None:
         await async_remove_snapshot(hass, entry.unique_id)
-
-
-@callback
-def _async_register_bridge_device(
-    hass: HomeAssistant,
-    entry: RfClonerConfigEntry,
-    esphome_entry_id: str,
-    bridge_id: str,
-) -> None:
-    """Create this bridge's own device, hung off the ESPHome node that carries it."""
-    registry = dr.async_get(hass)
-    device = registry.async_get_or_create(
-        config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, bridge_id)},
-        name=entry.title,
-        manufacturer=MANUFACTURER,
-        model=MODEL,
-        serial_number=bridge_id,
-    )
-    esphome_device_id = _async_find_esphome_device(hass, esphome_entry_id)
-    if esphome_device_id is not None and device.via_device_id != esphome_device_id:
-        registry.async_update_device(device.id, via_device_id=esphome_device_id)
-
-
-@callback
-def _async_find_esphome_device(hass: HomeAssistant, esphome_entry_id: str) -> str | None:
-    """Locate the node's main device so the bridge can be linked to it.
-
-    ESPHome registers its main device by network MAC and gives it no identifiers, so it is found
-    through the connection its config entry's unique id names. The lookup is scoped to that config
-    entry, because a connection is only unique within one.
-    """
-    entry = hass.config_entries.async_get_entry(esphome_entry_id)
-    if entry is None or entry.unique_id is None:
-        return None
-    device = dr.async_get(hass).async_get_device_by_connection(
-        (dr.CONNECTION_NETWORK_MAC, dr.format_mac(entry.unique_id)), esphome_entry_id
-    )
-    return device.id if device is not None else None

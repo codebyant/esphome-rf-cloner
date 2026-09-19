@@ -2,9 +2,9 @@
 
 When a bridge reports an identity that is not the one its config entry adopted, the hardware is
 either a replacement or has been factory reset. Its registry describes a different logical bridge,
-so Home Assistant must treat everything it says as irrelevant: keep mirroring nothing, keep the
-command subentries it already has, and above all keep the replica, because that replica is the
-only thing a restore can read from.
+so Home Assistant must treat everything it says as irrelevant: adopt none of it, keep the RF
+targets and command organisation it already has, and above all keep the replica, because that
+replica is the only thing a restore can read from.
 
 These are the invariants the live replacement test depends on, so they are pinned here rather than
 left to be re-proven by hand against real hardware.
@@ -20,7 +20,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import ha_stubs  # noqa: E402
-from ha_stubs import ConfigEntryState, Recorder, _ConfigSubentry  # noqa: E402
+from ha_stubs import (  # noqa: E402
+    ConfigEntryState,
+    FakeEntityRegistry,
+    Recorder,
+    _ConfigSubentry,
+)
 
 # The mismatch warning is the behaviour under test, not something to read here.
 logging.disable(logging.WARNING)
@@ -28,11 +33,13 @@ logging.disable(logging.WARNING)
 models = ha_stubs.load("models")
 reconcile = ha_stubs.load("reconcile")
 snapshot_module = ha_stubs.load("snapshot")
+targets_module = ha_stubs.load("targets")
 
 BridgeStatus = models.BridgeStatus
 
 OURS = "b7397c870440b9228377fbdb4ed95624"
 FOREIGN = "0123456789abcdef0123456789abcdef"
+TARGET_ID = "aa11bb22cc33dd44ee55ff6677889900"
 
 PASSED = 0
 FAILED = 0
@@ -72,7 +79,7 @@ def status(bridge_id: str, commands: list[tuple[int, str]], **overrides) -> Brid
 
 
 class FakeConfigEntries:
-    """Records every subentry mutation, so a test can assert that none happened."""
+    """Records every entry and subentry mutation, so a test can assert that none happened."""
 
     def __init__(self, recorder: Recorder) -> None:
         self.recorder = recorder
@@ -90,28 +97,47 @@ class FakeConfigEntries:
         if title is not None:
             subentry.title = title
 
+    def async_update_entry(self, entry, *, options=None, **kwargs) -> None:
+        self.recorder.calls.append(("update_entry", options))
+        if options is not None:
+            entry.options = options
+
 
 class FakeHass:
     def __init__(self, recorder: Recorder) -> None:
         self.config_entries = FakeConfigEntries(recorder)
+        self.entity_registry = FakeEntityRegistry(recorder)
 
 
 class FakeEntry:
+    entry_id = "01ENTRYIDFORTHETESTSXXXXXX"
+
     def __init__(self, unique_id: str) -> None:
         self.unique_id = unique_id
         self.title = "RF Bridge"
         self.state = ConfigEntryState.LOADED
         self.subentries: dict[str, _ConfigSubentry] = {}
+        self.options: dict = {}
 
-    def add_command(self, command_id: int, name: str) -> _ConfigSubentry:
+    def add_target(self, target_id: str, name: str) -> _ConfigSubentry:
         subentry = _ConfigSubentry(
-            data={"command_id": command_id},
-            subentry_type="command",
+            data={"target_id": target_id, "target_type": "fan", "area_id": None},
+            subentry_type="target",
             title=name,
-            unique_id=f"{self.unique_id}_{command_id}",
+            unique_id=f"{self.unique_id}_target_{target_id}",
         )
         self.subentries[subentry.subentry_id] = subentry
         return subentry
+
+    def assign(self, command_id: int, target_id: str | None, icon: str | None) -> None:
+        stored = dict(self.options.get("commands", {}))
+        entry: dict[str, str] = {}
+        if target_id is not None:
+            entry["target_id"] = target_id
+        if icon is not None:
+            entry["icon"] = icon
+        stored[str(command_id)] = entry
+        self.options = {**self.options, "commands": stored}
 
 
 class FakeCoordinator:
@@ -136,20 +162,31 @@ class FakeTransport:
         return None
 
 
+def hass_of(reconciler):
+    """The FakeHass a reconciler was built against."""
+    return reconciler._hass
+
+
 def build(entry_unique_id: str = OURS):
-    """A loaded entry mirroring one command, with every mutation path recorded."""
+    """A loaded entry with one target and one command assigned to it, fully instrumented."""
     recorder = Recorder()
     hass = FakeHass(recorder)
     entry = FakeEntry(entry_unique_id)
-    entry.add_command(2, "probe_2")
+    entry.add_target(TARGET_ID, "Bedroom Fan")
+    entry.assign(2, TARGET_ID, "mdi:fan")
+    hass.entity_registry.add("button.probe_2", f"{OURS}_2", entry.entry_id)
+    hass.entity_registry.add(
+        "button.rf_bridge_cancel_learning", f"{OURS}_cancel_learn", entry.entry_id
+    )
     coordinator = FakeCoordinator(recorder, status(OURS, [(2, "probe_2")]))
     reconciler = reconcile.CommandReconciler(hass, entry, coordinator)
     reconciler.async_activate()
+    recorder.calls.clear()
     return recorder, entry, reconciler
 
 
 async def test_reconciliation_freezes() -> None:
-    """A foreign registry is not adopted, and the existing mirror is left alone."""
+    """A foreign registry is not adopted, and the existing organisation is left alone."""
     print("identity mismatch: reconciliation freezes")
     recorder, entry, reconciler = build()
 
@@ -157,20 +194,19 @@ async def test_reconciliation_freezes() -> None:
     reconciler.async_reconcile(status(FOREIGN, []))
 
     check("the mismatch is detected", reconciler.identity_mismatch)
-    check("no subentry is added, removed or renamed", not recorder, str(recorder.names()))
-    check("the existing command subentry survives", len(entry.subentries) == 1)
-    survivor = next(iter(entry.subentries.values()))
-    check("it still names the original command", survivor.title == "probe_2")
-    check(
-        "it is still keyed to the original bridge",
-        survivor.unique_id == f"{OURS}_2",
-        survivor.unique_id,
-    )
+    check("nothing is added, removed or rewritten", not recorder, str(recorder.names()))
+    check("the RF target survives", len(entry.subentries) == 1)
+    target = next(iter(targets_module.targets(entry).values()))
+    check("it still names the original target", target.name == "Bedroom Fan")
+    check("it keeps its immutable id", target.target_id == TARGET_ID, target.target_id)
+    meta = targets_module.meta_for(entry, 2)
+    check("the command is still assigned to it", meta.target_id == TARGET_ID)
+    check("and keeps its icon", meta.icon == "mdi:fan", str(meta.icon))
     check("no mutation is sent to the device", ("device_delete", 2) not in recorder.calls)
 
 
 async def test_foreign_commands_are_not_adopted() -> None:
-    """Commands belonging to the replacement hardware are ignored, not imported into the mirror."""
+    """Commands belonging to the replacement hardware are ignored, not organised locally."""
     print("\nidentity mismatch: a foreign registry is not adopted")
     recorder, entry, reconciler = build()
 
@@ -178,11 +214,13 @@ async def test_foreign_commands_are_not_adopted() -> None:
 
     check("the mismatch is detected", reconciler.identity_mismatch)
     check("nothing is adopted", not recorder, str(recorder.names()))
-    check("the mirror still holds exactly one command", len(entry.subentries) == 1)
+    check("no command is made visible", reconciler.async_visible_commands() == set())
     check(
-        "and it is ours, not theirs",
-        next(iter(entry.subentries.values())).title == "probe_2",
+        "the listing is reported as unusable, not as empty",
+        reconciler.async_listed_commands() is None,
     )
+    check("the organisation still holds exactly one command", len(targets_module.command_meta(entry)) == 1)
+    check("and it is ours, not theirs", targets_module.meta_for(entry, 2).target_id == TARGET_ID)
 
 
 async def test_recovery_after_identity_returns() -> None:
@@ -194,7 +232,20 @@ async def test_recovery_after_identity_returns() -> None:
 
     reconciler.async_reconcile(status(OURS, [(2, "probe_2")]))
     check("the mismatch clears", not reconciler.identity_mismatch)
-    check("the mirror is still correct, with no churn", not recorder, str(recorder.names()))
+    check("the organisation is unchanged, with no churn", not recorder, str(recorder.names()))
+    check("the command is visible again", reconciler.async_visible_commands() == {2})
+    check(
+        "its entity was not purged",
+        "button.probe_2" in hass_of(reconciler).entity_registry.records,
+    )
+    check(
+        "and neither was the bridge's own",
+        "button.rf_bridge_cancel_learning" in hass_of(reconciler).entity_registry.records,
+    )
+    check(
+        "and still on its target",
+        targets_module.meta_for(entry, 2).target_id == TARGET_ID,
+    )
 
 
 async def test_snapshot_refuses_foreign_registry() -> None:

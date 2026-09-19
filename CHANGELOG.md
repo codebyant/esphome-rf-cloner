@@ -12,6 +12,49 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### RF devices
+
+- Learned commands can be grouped under **RF devices**: one Home Assistant device per piece of
+  equipment — a ceiling fan, a gate, a shutter — with that equipment's commands as its buttons.
+  Each RF device is linked to the bridge it is reached through.
+- RF devices carry an optional **type** (Fan, Gate, Light, Shutter or cover, TV, Air conditioner,
+  Generic, Other) and an **area**. The area is applied when the device is created and never
+  reapplied, so a later move of your own is not overwritten.
+- Commands may stay **unassigned**, and do by default. An unassigned command is an ordinary
+  button with no device, which is what every 0.1 command already was. No placeholder device is
+  invented for them.
+- Commands can be moved between RF devices, and back to unassigned, without relearning. A move
+  keeps the command's id, unique id, entity id and history, writes nothing to the bridge and does
+  not advance the registry's revision.
+- Per-command **icons**, chosen with Home Assistant's icon picker, or suggested from the command's
+  name and its RF device's type. The integration's icon is a default: an icon set on the entity
+  itself takes precedence and is never overwritten.
+- Learning now asks which RF device a command belongs to and lands it there directly, rather than
+  having it appear unassigned and move a moment later.
+- Command management — learn, rename, re-icon, move, delete — moved into the bridge's
+  **Configure** menu, so none of it needs Developer Tools.
+
+### Changed
+
+- **Deleting a subentry no longer deletes an RF command.** In 0.1 a subentry was a command; in 0.2
+  it is a piece of equipment. Removing an RF device now only ungroups: its commands become
+  unassigned, keep their buttons and history, and stay on the bridge. Deleting a command is a
+  separate, explicitly confirmed action that still deletes by immutable id.
+- The config entry's schema version is now 2. Existing 0.1 entries are migrated on first load:
+  commands become unassigned, every entity keeps the registry record it already had — same entity
+  id, unique id, area, icon and customisations — and nothing is written to the bridge.
+
+### Fixed
+
+- A command deleted on the bridge itself now has its entity registry record removed with it,
+  instead of leaving an orphaned record holding on to its entity id.
+
+### Testing
+
+- New suite that runs the integration inside a real Home Assistant, covering the 0.1 migration,
+  the target model, assignment, icons, reconciliation, deletion semantics and hardware
+  replacement. The existing suites, which stub Home Assistant, keep covering the pure logic.
+
 ## [0.1.0] — 2026-09-18
 
 First public release.

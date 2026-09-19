@@ -11,7 +11,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 
 from .data import RfClonerConfigEntry
-from .reconcile import command_subentries
+from .targets import command_meta, commands_for_target, targets
 
 
 async def async_get_config_entry_diagnostics(
@@ -26,7 +26,23 @@ async def async_get_config_entry_diagnostics(
             "unique_id": entry.unique_id,
             "esphome_entry_id": runtime.bound_to[0],
             "action_prefix": runtime.bound_to[1],
-            "subentries": len(command_subentries(entry)),
+            "version": f"{entry.version}.{entry.minor_version}",
+        },
+        "targets": [
+            {
+                "target_id": target.target_id,
+                "type": target.target_type,
+                "has_area": target.area_id is not None,
+                "commands": sorted(commands_for_target(entry, target.target_id)),
+            }
+            for target in targets(entry).values()
+        ],
+        "command_meta": {
+            str(command_id): {
+                "assigned": meta.target_id is not None,
+                "icon": meta.icon,
+            }
+            for command_id, meta in sorted(command_meta(entry).items())
         },
         "transport": {
             "node_name": runtime.transport.node_name,
