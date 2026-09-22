@@ -11,6 +11,13 @@ Commands are not subentries. A command's entity has to be able to live on a targ
 a device belongs to exactly one subentry, so a command that was itself a subentry could never
 join one. Commands are managed through the entry's options flow instead: learning, renaming,
 choosing an icon, moving between targets and deleting are all steps of one menu.
+
+Learning is the exception, and only in how it is reached. It is the thing a user does most, and
+burying the most-used action behind the bridge's configure gear is how it shipped in 0.2.0. Home
+Assistant's integration page renders one button per key of `async_get_supported_subentry_types`
+and offers no other way to put a named action there, so learning is registered as a second key
+whose flow ends in an abort and creates nothing. The steps themselves are shared with the options
+flow rather than copied - see `LearnCommandSteps` - so the two entrances cannot drift apart.
 """
 
 from __future__ import annotations
@@ -33,8 +40,6 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import (
     AreaSelector,
-    ConfigEntrySelector,
-    ConfigEntrySelectorConfig,
     IconSelector,
     SelectOptionDict,
     SelectSelector,
@@ -44,6 +49,7 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    ACTION_TYPE_LEARN_COMMAND,
     CONF_ACTION_PREFIX,
     CONF_AREA_ID,
     CONF_COMMAND_ID,
@@ -87,9 +93,38 @@ _LOGGER = logging.getLogger(__name__)
 UNASSIGNED = "__unassigned__"
 
 
-def _esphome_entry_selector() -> ConfigEntrySelector:
-    """A picker limited to ESPHome config entries."""
-    return ConfigEntrySelector(ConfigEntrySelectorConfig(integration=ESPHOME_DOMAIN))
+@callback
+def _esphome_entries(hass: HomeAssistant) -> list[ConfigEntry]:
+    """Every ESPHome config entry, in the order a picker should list them."""
+    return sorted(
+        hass.config_entries.async_entries(ESPHOME_DOMAIN),
+        key=lambda entry: entry.title.lower(),
+    )
+
+
+@callback
+def _esphome_entry_selector(hass: HomeAssistant) -> SelectSelector:
+    """A picker over the ESPHome nodes that exist, by config entry id.
+
+    This is deliberately not `ConfigEntrySelector`, which is the selector the relationship
+    actually calls for. Home Assistant's frontend has no initial value for a `config_entry`
+    selector, and `computeInitialHaFormData` throws on a *required* one that carries no default
+    - which kills the render of the whole step, leaving a dialog with nothing in it but its
+    submit button. It is reached only from a config flow, so the selector works in an action's
+    fields and in our reconfigure step (which supplies a default) while failing here.
+
+    The value is still the ESPHome config entry id, so nothing downstream changes: what is
+    stored, matched and re-pointed is the entry, never the node's name.
+    """
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[
+                SelectOptionDict(value=entry.entry_id, label=entry.title)
+                for entry in _esphome_entries(hass)
+            ],
+            mode=SelectSelectorMode.DROPDOWN,
+        )
+    )
 
 
 def _target_type_selector() -> SelectSelector:
@@ -146,8 +181,16 @@ class RfClonerConfigFlow(ConfigFlow, domain=DOMAIN):
     def async_get_supported_subentry_types(
         cls, config_entry: ConfigEntry
     ) -> dict[str, type[ConfigSubentryFlow]]:
-        """RF targets are managed as subentries."""
-        return {SUBENTRY_TYPE_TARGET: TargetSubentryFlow}
+        """The actions the integration page offers for this bridge.
+
+        Only the first is a subentry type in the ordinary sense. The second is registered here
+        because this mapping is the only thing Home Assistant turns into a labelled button on the
+        integration page, and learning a command deserves to be one; its flow creates no subentry.
+        """
+        return {
+            SUBENTRY_TYPE_TARGET: TargetSubentryFlow,
+            ACTION_TYPE_LEARN_COMMAND: LearnCommandFlow,
+        }
 
     @staticmethod
     @callback
@@ -159,6 +202,11 @@ class RfClonerConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Pick an ESPHome node and confirm it is running an rf_cloner bridge."""
+        if not _esphome_entries(self.hass):
+            # A picker with nothing in it is indistinguishable from a broken form, and there is
+            # no useful answer the user could give, so say what is missing instead.
+            return self.async_abort(reason="no_esphome_entries")
+
         errors: dict[str, str] = {}
         if user_input is not None:
             esphome_entry_id = user_input[CONF_ESPHOME_ENTRY_ID]
@@ -181,7 +229,9 @@ class RfClonerConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_ESPHOME_ENTRY_ID): _esphome_entry_selector(),
+                    vol.Required(CONF_ESPHOME_ENTRY_ID): _esphome_entry_selector(
+                        self.hass
+                    ),
                     vol.Optional(
                         CONF_ACTION_PREFIX, default=DEFAULT_ACTION_PREFIX
                     ): TextSelector(),
@@ -200,6 +250,16 @@ class RfClonerConfigFlow(ConfigFlow, domain=DOMAIN):
         offered a restore rather than silently adopted.
         """
         entry = self._get_reconfigure_entry()
+        choices = _esphome_entries(self.hass)
+        if not choices:
+            return self.async_abort(reason="no_esphome_entries")
+
+        # The node this bridge is bound to may be the thing that went away - which is the whole
+        # point of reconfiguring - so it is only offered as the starting point if it still exists.
+        current = entry.data.get(CONF_ESPHOME_ENTRY_ID)
+        if all(choice.entry_id != current for choice in choices):
+            current = vol.UNDEFINED
+
         errors: dict[str, str] = {}
         if user_input is not None:
             esphome_entry_id = user_input[CONF_ESPHOME_ENTRY_ID]
@@ -218,9 +278,8 @@ class RfClonerConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(
-                        CONF_ESPHOME_ENTRY_ID,
-                        default=entry.data.get(CONF_ESPHOME_ENTRY_ID),
-                    ): _esphome_entry_selector(),
+                        CONF_ESPHOME_ENTRY_ID, default=current
+                    ): _esphome_entry_selector(self.hass),
                     vol.Optional(
                         CONF_ACTION_PREFIX,
                         default=entry.data.get(CONF_ACTION_PREFIX, DEFAULT_ACTION_PREFIX),
@@ -444,18 +503,25 @@ class TargetSubentryFlow(ConfigSubentryFlow):
         )
 
 
-class RfClonerOptionsFlow(OptionsFlow):
-    """Manage this bridge's learned commands.
+class LearnCommandSteps:
+    """Naming a command, capturing it, and recording where it belongs.
 
-    Deliberately a plain OptionsFlow rather than OptionsFlowWithReload: the entry carries an
-    update listener, and the reloading variant is not allowed alongside one. Every step here
-    writes what it changed and ends with an abort, so nothing overwrites the entry's options
-    wholesale on the way out.
+    Mixed into both flows that can start a learn: the options flow's menu, and the `Learn command`
+    action on the integration page. Everything that decides what actually happens lives here once
+    - the name validation, the reservation that keeps a half-learned command out of sight, the
+    capture, the placement and the icon - so the two entrances are the same learn reached two ways
+    rather than two implementations of it.
+
+    The host supplies `_entry`. Nothing else differs between them: both write the command's
+    organisation to the *entry's* options, which is where a command's target and icon live
+    regardless of which flow put them there.
     """
 
+    hass: HomeAssistant
+
     def __init__(self) -> None:
-        """Start with nothing chosen."""
-        self._command_id: int | None = None
+        """Start with nothing named, chosen or captured."""
+        super().__init__()
         self._name: str = ""
         self._icon: str | None = None
         self._target_id: str | None = None
@@ -463,24 +529,12 @@ class RfClonerOptionsFlow(OptionsFlow):
 
     @property
     def _entry(self) -> RfClonerConfigEntry:
-        """The bridge being managed."""
-        return self.config_entry
+        """The bridge being learned onto."""
+        raise NotImplementedError
 
     def _runtime(self):
         """This bridge's runtime data, or None when it is not loaded."""
         return getattr(self._entry, "runtime_data", None)
-
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Offer the things a user does to commands."""
-        if self._runtime() is None:
-            return self.async_abort(reason="not_loaded")
-        return self.async_show_menu(
-            step_id="init", menu_options=["learn_command", "manage_command"]
-        )
-
-    # Learning
 
     async def async_step_learn_command(
         self, user_input: dict[str, Any] | None = None
@@ -597,6 +651,73 @@ class RfClonerOptionsFlow(OptionsFlow):
                 "name": outcome.name,
                 "target": target.name if target else "Unassigned",
             },
+        )
+
+
+class LearnCommandFlow(LearnCommandSteps, ConfigSubentryFlow):
+    """The `Learn command` button on the integration page.
+
+    Registered as a subentry type because that mapping is the only thing Home Assistant renders as
+    a named action there, and learning is what a user of this integration does most - in 0.2.0 it
+    was reachable only through the bridge's configure gear, two screens down, which is where it
+    went unfound.
+
+    It creates no subentry. A command cannot be one: its entity has to sit on the device of the
+    target it drives, and an entity belongs to exactly one subentry, so a command that was itself
+    a subentry could never join a target's device. The flow ends in an abort, and Home Assistant
+    adds a subentry only for a create, so nothing named `learn_command` is ever written anywhere.
+    A command learned from this button and a command learned from the options menu are the same
+    record, with the same id, unique_id, entity and history.
+    """
+
+    @property
+    def _entry(self) -> RfClonerConfigEntry:
+        """The bridge this action was started from."""
+        return self._get_entry()
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Open on the learn form itself, with no menu in front of it.
+
+        This is the whole point of the button: Home Assistant starts a subentry flow at
+        `async_step_user`, so that step *is* the form, and the user lands on Name, RF device and
+        Icon in one click. The step then renames itself to `learn_command` for the rest of the
+        flow, which is what keeps its strings and the options flow's the same shape.
+
+        Whatever Home Assistant initialised the flow with is discarded rather than submitted: a
+        started action has nothing to say about what is being learned.
+        """
+        return await self.async_step_learn_command()
+
+
+class RfClonerOptionsFlow(LearnCommandSteps, OptionsFlow):
+    """Manage this bridge's learned commands.
+
+    Deliberately a plain OptionsFlow rather than OptionsFlowWithReload: the entry carries an
+    update listener, and the reloading variant is not allowed alongside one. Every step here
+    writes what it changed and ends with an abort, so nothing overwrites the entry's options
+    wholesale on the way out.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing chosen."""
+        super().__init__()
+        self._command_id: int | None = None
+
+    @property
+    def _entry(self) -> RfClonerConfigEntry:
+        """The bridge being managed."""
+        return self.config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Offer the things a user does to commands."""
+        if self._runtime() is None:
+            return self.async_abort(reason="not_loaded")
+        return self.async_show_menu(
+            step_id="init", menu_options=["learn_command", "manage_command"]
         )
 
     # Managing an existing command

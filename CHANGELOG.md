@@ -12,6 +12,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Adding the integration showed an empty form.** On Home Assistant 2026.9 the *Connect an RF
+  bridge* step rendered with no fields at all, so a new install could not get past it. The ESPHome
+  node is now chosen from an ordinary dropdown built from the ESPHome config entries that exist:
+  the frontend cannot compute an initial value for a required `config_entry` selector and gives up
+  on the whole form when it meets one. The value stored is still the ESPHome config entry id, so
+  nothing else changes. Setting up with no ESPHome integration at all now says so instead of
+  offering an empty picker.
+
+### Added
+
+- **The integration has its own icon.** Home Assistant showed *icon not available* everywhere this
+  integration appeared, because it draws integration icons from `brands.home-assistant.io` and
+  that repository only accepts integrations that are already distributed. Home Assistant 2026.9
+  looks in a custom integration's own `brand/` directory first, so the icon now ships here and no
+  longer waits on a pull request to someone else's repository. One `icon.png` covers every variant
+  Home Assistant asks for - the 2x, the logo and the dark-mode forms all fall back to it.
+- **`Learn command` on the integration page**, beside *Add an RF device*. Learning was reachable
+  only through the bridge's **Configure** menu, two screens in, which is a strange place for the
+  thing this integration exists to do. The button opens the same learn form directly — name, RF
+  device, icon — and the **Configure -> RF commands** route is unchanged for anyone already using
+  it. Both entrances run the same code, so a command learned either way is the same record.
+  Existing installs get the button on update; nothing is migrated and nothing is stored
+  differently.
+
 ## [0.2.0] — 2026-09-18
 
 ### RF devices
