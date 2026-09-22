@@ -22,6 +22,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   nothing else changes. Setting up with no ESPHome integration at all now says so instead of
   offering an empty picker.
 
+### Added
+
+- **`Learn command` on the integration page**, beside *Add an RF device*. Learning was reachable
+  only through the bridge's **Configure** menu, two screens in, which is a strange place for the
+  thing this integration exists to do. The button opens the same learn form directly — name, RF
+  device, icon — and the **Configure -> RF commands** route is unchanged for anyone already using
+  it. Both entrances run the same code, so a command learned either way is the same record.
+  Existing installs get the button on update; nothing is migrated and nothing is stored
+  differently.
+
 ## [0.2.0] — 2026-09-18
 
 ### RF devices

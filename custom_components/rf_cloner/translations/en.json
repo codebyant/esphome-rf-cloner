@@ -167,6 +167,47 @@
         "reconfigure_successful": "The RF device was updated.",
         "already_configured": "This RF device is already set up."
       }
+    },
+    "learn_command": {
+      "entry_type": "RF command",
+      "initiate_flow": {
+        "user": "Learn command"
+      },
+      "step": {
+        "learn_command": {
+          "title": "Learn a command",
+          "description": "Name the command and choose the RF device it belongs to, then hold the button on your remote when asked. Letters, digits, underscore, hyphen and full stop only, up to 23 characters.",
+          "data": {
+            "name": "Name",
+            "target_id": "RF device",
+            "icon": "Icon"
+          },
+          "data_description": {
+            "name": "Stored on the bridge, so it is also what the bridge's own web page shows.",
+            "target_id": "Which piece of equipment this command drives. Leave it unassigned if you would rather not group it, or add an RF device first to group it.",
+            "icon": "Optional. Left empty, one is suggested from the name and the device type."
+          }
+        },
+        "learn": {
+          "title": "Learn a command"
+        }
+      },
+      "error": {
+        "name_empty": "Enter a name.",
+        "name_too_long": "That name is longer than 23 characters.",
+        "name_invalid": "Use only letters, digits, underscore, hyphen and full stop.",
+        "name_taken": "This bridge already has a command with that name."
+      },
+      "progress": {
+        "learning": "Press and hold the button on your remote now to teach it \"{name}\"."
+      },
+      "abort": {
+        "not_loaded": "The bridge is not ready yet. Try again once it has connected.",
+        "not_writable": "The bridge is not accepting changes right now.",
+        "registry_full": "The bridge has no free command slots left.",
+        "learn_failed": "Nothing was learned: {detail}.",
+        "learned": "Learned \"{name}\" and assigned it to {target}."
+      }
     }
   },
   "selector": {

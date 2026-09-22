@@ -31,6 +31,13 @@ DEFAULT_ACTION_PREFIX: Final = "rf_"
 SUBENTRY_TYPE_COMMAND: Final = "command"
 SUBENTRY_TYPE_TARGET: Final = "target"
 
+# Learning is offered as a second entry in `async_get_supported_subentry_types`, because that
+# mapping is the only thing Home Assistant's integration page turns into a labelled button of our
+# own. Its flow creates no subentry - it aborts when the capture lands, and the command is
+# recorded in the entry's options like every other command - so nothing of this name is ever
+# persisted. It is an action, and the name says so rather than pretending to be a resource.
+ACTION_TYPE_LEARN_COMMAND: Final = "learn_command"
+
 # The config entry's schema version. 1 is 0.1's flat command subentries; 2 is RF targets.
 ENTRY_VERSION: Final = 2
 ENTRY_MINOR_VERSION: Final = 1
