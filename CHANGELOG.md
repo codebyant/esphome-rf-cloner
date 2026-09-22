@@ -24,6 +24,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The integration has its own icon.** Home Assistant showed *icon not available* everywhere this
+  integration appeared, because it draws integration icons from `brands.home-assistant.io` and
+  that repository only accepts integrations that are already distributed. Home Assistant 2026.9
+  looks in a custom integration's own `brand/` directory first, so the icon now ships here and no
+  longer waits on a pull request to someone else's repository. One `icon.png` covers every variant
+  Home Assistant asks for - the 2x, the logo and the dark-mode forms all fall back to it.
 - **`Learn command` on the integration page**, beside *Add an RF device*. Learning was reachable
   only through the bridge's **Configure** menu, two screens in, which is a strange place for the
   thing this integration exists to do. The button opens the same learn form directly — name, RF
