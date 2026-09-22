@@ -38,6 +38,7 @@
     },
     "abort": {
       "already_configured": "This bridge is already set up.",
+      "no_esphome_entries": "There are no ESPHome devices set up yet. Add the ESPHome integration for the node running the rf_cloner component first, then come back here.",
       "reconfigure_successful": "The bridge now uses the selected node.",
       "restore_successful": "The bridge was restored onto the replacement hardware.",
       "no_snapshot": "There is no snapshot to restore. Home Assistant has never read a complete copy of this bridge's commands.",

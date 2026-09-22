@@ -33,8 +33,6 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import (
     AreaSelector,
-    ConfigEntrySelector,
-    ConfigEntrySelectorConfig,
     IconSelector,
     SelectOptionDict,
     SelectSelector,
@@ -87,9 +85,38 @@ _LOGGER = logging.getLogger(__name__)
 UNASSIGNED = "__unassigned__"
 
 
-def _esphome_entry_selector() -> ConfigEntrySelector:
-    """A picker limited to ESPHome config entries."""
-    return ConfigEntrySelector(ConfigEntrySelectorConfig(integration=ESPHOME_DOMAIN))
+@callback
+def _esphome_entries(hass: HomeAssistant) -> list[ConfigEntry]:
+    """Every ESPHome config entry, in the order a picker should list them."""
+    return sorted(
+        hass.config_entries.async_entries(ESPHOME_DOMAIN),
+        key=lambda entry: entry.title.lower(),
+    )
+
+
+@callback
+def _esphome_entry_selector(hass: HomeAssistant) -> SelectSelector:
+    """A picker over the ESPHome nodes that exist, by config entry id.
+
+    This is deliberately not `ConfigEntrySelector`, which is the selector the relationship
+    actually calls for. Home Assistant's frontend has no initial value for a `config_entry`
+    selector, and `computeInitialHaFormData` throws on a *required* one that carries no default
+    - which kills the render of the whole step, leaving a dialog with nothing in it but its
+    submit button. It is reached only from a config flow, so the selector works in an action's
+    fields and in our reconfigure step (which supplies a default) while failing here.
+
+    The value is still the ESPHome config entry id, so nothing downstream changes: what is
+    stored, matched and re-pointed is the entry, never the node's name.
+    """
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[
+                SelectOptionDict(value=entry.entry_id, label=entry.title)
+                for entry in _esphome_entries(hass)
+            ],
+            mode=SelectSelectorMode.DROPDOWN,
+        )
+    )
 
 
 def _target_type_selector() -> SelectSelector:
@@ -159,6 +186,11 @@ class RfClonerConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Pick an ESPHome node and confirm it is running an rf_cloner bridge."""
+        if not _esphome_entries(self.hass):
+            # A picker with nothing in it is indistinguishable from a broken form, and there is
+            # no useful answer the user could give, so say what is missing instead.
+            return self.async_abort(reason="no_esphome_entries")
+
         errors: dict[str, str] = {}
         if user_input is not None:
             esphome_entry_id = user_input[CONF_ESPHOME_ENTRY_ID]
@@ -181,7 +213,9 @@ class RfClonerConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_ESPHOME_ENTRY_ID): _esphome_entry_selector(),
+                    vol.Required(CONF_ESPHOME_ENTRY_ID): _esphome_entry_selector(
+                        self.hass
+                    ),
                     vol.Optional(
                         CONF_ACTION_PREFIX, default=DEFAULT_ACTION_PREFIX
                     ): TextSelector(),
@@ -200,6 +234,16 @@ class RfClonerConfigFlow(ConfigFlow, domain=DOMAIN):
         offered a restore rather than silently adopted.
         """
         entry = self._get_reconfigure_entry()
+        choices = _esphome_entries(self.hass)
+        if not choices:
+            return self.async_abort(reason="no_esphome_entries")
+
+        # The node this bridge is bound to may be the thing that went away - which is the whole
+        # point of reconfiguring - so it is only offered as the starting point if it still exists.
+        current = entry.data.get(CONF_ESPHOME_ENTRY_ID)
+        if all(choice.entry_id != current for choice in choices):
+            current = vol.UNDEFINED
+
         errors: dict[str, str] = {}
         if user_input is not None:
             esphome_entry_id = user_input[CONF_ESPHOME_ENTRY_ID]
@@ -218,9 +262,8 @@ class RfClonerConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(
-                        CONF_ESPHOME_ENTRY_ID,
-                        default=entry.data.get(CONF_ESPHOME_ENTRY_ID),
-                    ): _esphome_entry_selector(),
+                        CONF_ESPHOME_ENTRY_ID, default=current
+                    ): _esphome_entry_selector(self.hass),
                     vol.Optional(
                         CONF_ACTION_PREFIX,
                         default=entry.data.get(CONF_ACTION_PREFIX, DEFAULT_ACTION_PREFIX),

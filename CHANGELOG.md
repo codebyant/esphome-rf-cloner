@@ -12,6 +12,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Adding the integration showed an empty form.** On Home Assistant 2026.9 the *Connect an RF
+  bridge* step rendered with no fields at all, so a new install could not get past it. The ESPHome
+  node is now chosen from an ordinary dropdown built from the ESPHome config entries that exist:
+  the frontend cannot compute an initial value for a required `config_entry` selector and gives up
+  on the whole form when it meets one. The value stored is still the ESPHome config entry id, so
+  nothing else changes. Setting up with no ESPHome integration at all now says so instead of
+  offering an empty picker.
+
 ## [0.2.0] — 2026-09-18
 
 ### RF devices
