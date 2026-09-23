@@ -208,6 +208,14 @@ Step-by-step, with screenshots.
 | [Architecture](docs/architecture.md) | How it works and why it is built this way |
 | [Troubleshooting](docs/troubleshooting.md) | When something does not behave |
 
+## How it came to be
+
+The project started as a way to clone one ceiling fan remote and grew from there. The in-depth
+story of its creation, from the first raw replay on the bench through the learner, persistent
+identity, backup and restore, to the Home Assistant integration and the bugs only a fresh install
+found, is on my blog, in English and Portuguese:
+[How a ceiling fan remote turned into a full RF cloner](https://antmiranda.dev/blog/in-depht/building-esphome-rf-cloner).
+
 ## Development
 
 ```sh
