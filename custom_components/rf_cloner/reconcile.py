@@ -293,7 +293,16 @@ class CommandReconciler:
             )
         self.async_snapshot_targets()
 
-        pruned = options_pruned_to(self._entry, self.async_listed_commands())
+        # Unlike a reconcile, which prunes against the read that has just arrived, this runs
+        # against whatever the coordinator last held - and the update that triggered it is often
+        # a learn recording the command it has just stored, which that read predates. Only ids the
+        # read could have listed are pruned; anything newer waits for the next one.
+        status = self._coordinator.data
+        pruned = options_pruned_to(
+            self._entry,
+            self.async_listed_commands(status),
+            listed_below=None if status is None else status.next_command_id,
+        )
         if pruned is not None:
             self._hass.config_entries.async_update_entry(self._entry, options=pruned)
             # The update this schedules re-enters here, finds nothing left to prune and stops.
