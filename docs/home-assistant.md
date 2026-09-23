@@ -4,7 +4,29 @@ The **RF Cloner Bridge** integration turns a bridge's learned commands into ordi
 Assistant entities, groups them under the equipment they actually drive, and gives you a native
 way to add, rename, organise and remove them.
 
-Installing it is covered in [installation.md](installation.md). This page is about using it.
+Installing it is covered in [installation.md](installation.md). This page is the reference for
+using it. For step-by-step walkthroughs, see the [guides](guides/README.md):
+[learn a command](guides/learn-a-command.md), [add an RF device](guides/add-an-rf-device.md),
+[rename, move or delete a command](guides/edit-move-or-delete-a-command.md) and
+[use your commands](guides/use-your-commands.md).
+
+## Finding your way around
+
+Everything starts on the integration page: **Settings → Devices & services → RF Cloner Bridge**.
+
+![The RF Cloner Bridge integration page](../assets/screenshots/03-integration-page.png)
+
+| Where | What it does |
+|---|---|
+| **Add hub** | Connects another bridge |
+| **Add an RF device** | Creates a piece of equipment to group commands under |
+| **Learn command** | Learns a new command straight away |
+| The bridge's row (*RF Bridge*) → **gear** | **Configure**: the RF commands menu — learn, edit or delete a command |
+| The bridge's row → **⋮** | Home Assistant's usual entry menu: reload, reconfigure, delete |
+| *Devices that don't belong to a sub-entry* | The bridge device itself. Unassigned commands belong to no device, so they are listed under **Entities**, not here |
+| An RF device's row (*Bedroom-Fan*) → **gear** | **Edit RF device**: name, type, area |
+| An RF device's row → **⋮** | Delete the RF device (ungroups its commands, erases nothing) |
+| The device rows underneath → **›** | The device's page, with its buttons and activity |
 
 ## Where authority lives
 
@@ -29,6 +51,8 @@ bridge's IP address.
 One device per logical bridge, shown as connected *via* the ESPHome node that carries it. Its
 entities:
 
+![The RF Bridge device page: stored commands, cancel learning and diagnostics](../assets/screenshots/09-bridge-device-page.png)
+
 | Entity | What it tells you |
 |---|---|
 | **Stored commands** | How many commands are on the device |
@@ -47,6 +71,8 @@ have to resolve deliberately, and both make the bridge refuse changes until you 
 ### One button per command
 
 Each learned command becomes a button entity. Press it to replay.
+
+![An RF device's page, one button per command](../assets/screenshots/07-rf-device-page.png)
 
 A single command is **not** a Home Assistant device — a stored waveform is not a piece of
 hardware. The equipment the command drives is, and that is what an *RF device* represents.
@@ -77,7 +103,9 @@ operation — no waveform is touched and the registry's revision does not move.
 
 ### Creating one
 
-On the bridge's device page, **Add an RF device**. Give it a name, a type and optionally an area.
+On the integration page, **Add an RF device**. Give it a name, a type and optionally an area.
+
+![The Add an RF device dialogue](../assets/screenshots/04-add-rf-device.png)
 
 The **type** — Fan, Gate, Light, Shutter or cover, TV, Air conditioner, Generic, Other — is
 presentation only. It labels the device and suggests icons. It deliberately does **not** turn the
@@ -100,8 +128,8 @@ these entities simply belong to no device, which is exactly what 0.1 did.
 
 ### Moving a command
 
-**Configure** on the bridge, then **Edit or delete a command**, then pick a different RF device —
-or **Unassigned**.
+**Configure** on the bridge (the gear on its row), then **Edit or delete a command**, pick the
+command, then pick a different RF device — or clear the field for **Unassigned**.
 
 Moving is Home Assistant-side only. The command keeps its id, its unique id, its entity id, its
 history and its waveform, and every automation referring to it keeps working. Nothing is relearned
@@ -109,7 +137,10 @@ and the bridge is not contacted.
 
 ## Learning a command
 
-On the bridge's device page, **Configure**, then **Learn a command**.
+On the integration page, **Learn command**. The same form is also under **Configure → Learn a
+command** on the bridge; both run the same code.
+
+![The Learn a command dialogue](../assets/screenshots/05-learn-command-form.png)
 
 1. Enter a name. Letters, digits, underscore, hyphen and full stop; up to 23 characters. This is
    the name stored on the device, so it is what the bridge's own web page shows too.
@@ -117,6 +148,8 @@ On the bridge's device page, **Configure**, then **Learn a command**.
 3. Optionally choose an icon. Left empty, one is suggested from the name and the device's type.
 4. The dialogue asks you to hold the button on the remote. **Hold it** — remotes repeat their
    frame while held, and agreement between repeats is what validates the capture.
+
+   ![The learn dialogue waiting for a button press](../assets/screenshots/06-learn-command-waiting.png)
 5. The button entity appears, already under the right device.
 
 If nothing is captured, the dialogue says why, in the device's own words:
@@ -132,12 +165,15 @@ If nothing is captured, the dialogue says why, in the device's own words:
 Each of these is a device-side tuning problem, covered in
 [troubleshooting.md](troubleshooting.md#learning-times-out).
 
-Learning under a name that already exists overwrites that command. That is the intended way to
-relearn one that has drifted.
+Learning under a name that already exists overwrites that command, keeping its id. That is the
+intended way to relearn one that has drifted. The learn form refuses a name that is already taken,
+to prevent accidents, so relearn through the `rf_cloner.learn` action or the bridge's own web page.
 
 ## Renaming a command
 
-**Configure**, then **Edit or delete a command**, then change the name.
+**Configure**, then **Edit or delete a command**, pick the command, then change the name.
+
+![Editing a command: name, RF device, icon and delete](../assets/screenshots/12-edit-command.png)
 
 A rename is the one command edit that *does* reach the bridge, because the name is stored there —
 it is what the bridge's own web page shows. Commands are keyed by an immutable id, so the entity,
@@ -166,7 +202,8 @@ These are two different things, and the difference matters.
 
 ### Deleting an RF device
 
-Delete the RF device from the bridge's page. This is **organisational**:
+On the integration page, the **⋮** menu on the RF device's row, then **Delete**. This is
+**organisational**:
 
 - the RF device and its Home Assistant device disappear,
 - its commands become **Unassigned** and keep their buttons, ids, icons and history,

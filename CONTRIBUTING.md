@@ -31,7 +31,9 @@ packages/                   includable ESPHome YAML: controls and Home Assistant
 config/                     reference configurations and the hardware bring-up check
 custom_components/rf_cloner/  the Home Assistant integration
 tests/                      host tests for both halves
-docs/                       everything a user needs
+docs/                       reference documentation: everything a user needs
+docs/guides/                step-by-step tasks, with screenshots
+assets/                     the integration icon sources and documentation screenshots
 ```
 
 ## Running the tests
@@ -111,6 +113,9 @@ differently from its surroundings will get that comment in review.
 - One change per pull request.
 - Tests green, and a new test for anything that was a bug.
 - Documentation updated in the same pull request, not a follow-up.
+- A change to a dialogue's wording or layout updates the matching screenshot in
+  `assets/screenshots/`, keeping its file name — see
+  [its index](assets/screenshots/README.md).
 - No version bumps. Releases are cut separately.
 
 ## Reporting a problem

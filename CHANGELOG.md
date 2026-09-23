@@ -12,6 +12,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- **Step-by-step guides with screenshots**, in `docs/guides/`: learning a new command (and
+  relearning one), adding an RF device, renaming, moving and deleting a command, and using
+  commands on dashboards, in automations and on the bridge itself. The README, installation and
+  Home Assistant pages now show the real dialogues, and their directions point at where things
+  actually are - *Add an RF device* and *Learn command* on the integration page, not on the
+  bridge's device page.
+
 ### Fixed
 
 - **Adding the integration showed an empty form.** On Home Assistant 2026.9 the *Connect an RF

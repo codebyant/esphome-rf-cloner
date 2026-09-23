@@ -5,6 +5,14 @@ Two halves, in two parts: [the bridge](#the-bridge) first, then
 the first part - if a command will not learn or will not drive its target, the integration is not
 involved.
 
+The quickest look at what the bridge thinks is happening is its device page in Home Assistant:
+**Learn state**, **Last result** and the two storage problem sensors, with an activity log of each
+change.
+
+![The RF Bridge device page, showing Learn state, Last result and the storage sensors](../assets/screenshots/09-bridge-device-page.png)
+
+A `Last result` of `deleted:<name>` records a delete, not a failure.
+
 ---
 
 # The bridge
