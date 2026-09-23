@@ -209,7 +209,10 @@ def options_with(
 
 
 def options_pruned_to(
-    entry: ConfigEntry, command_ids: set[int] | None
+    entry: ConfigEntry,
+    command_ids: set[int] | None,
+    *,
+    listed_below: int | None = None,
 ) -> dict[str, Any] | None:
     """This entry's options with metadata for absent commands and targets dropped.
 
@@ -225,12 +228,23 @@ def options_pruned_to(
     dangling target assignments are cleared then, because "the device listed no commands" and
     "we have not been told what the device has" must not look the same: treating the second as
     the first would discard every icon and assignment the user has set.
+
+    `listed_below` is for a listing that may be older than the metadata being pruned: the
+    next_command_id it was read with. The device mints ids from that counter and never hands one
+    out twice, so an id at or past it was learned after the listing was taken, and the listing not
+    naming it is no evidence that it is gone. Left as None, the listing is taken as current and
+    every id it does not name is pruned - which is also what clears metadata left above the counter
+    when a restore winds it back.
     """
     current = command_meta(entry)
     known_targets = targets(entry)
     updates: dict[int, CommandMeta] = {}
     for command_id, meta in current.items():
-        if command_ids is not None and command_id not in command_ids:
+        if (
+            command_ids is not None
+            and command_id not in command_ids
+            and (listed_below is None or command_id < listed_below)
+        ):
             updates[command_id] = CommandMeta()
         elif meta.target_id is not None and meta.target_id not in known_targets:
             updates[command_id] = CommandMeta(target_id=None, icon=meta.icon)

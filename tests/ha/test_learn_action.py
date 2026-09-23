@@ -18,6 +18,7 @@ so a `learn_command` subentry would be a thing no command could ever be attached
 
 from __future__ import annotations
 
+from datetime import timedelta
 import json
 from pathlib import Path
 from typing import Any
@@ -26,8 +27,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.translation import async_get_translations
+from homeassistant.helpers.update_coordinator import REQUEST_REFRESH_DEFAULT_COOLDOWN
 from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
 import pytest
+from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.rf_cloner.const import (
     ACTION_TYPE_LEARN_COMMAND,
@@ -98,6 +102,19 @@ async def _learn_via_menu(
         result = await hass.config_entries.options.async_configure(result["flow_id"])
     await hass.async_block_till_done()
     return result
+
+
+async def _let_deferred_refreshes_land(hass: HomeAssistant) -> None:
+    """Run out the request-refresh cooldown, so a refresh it held back actually happens.
+
+    A learn asks for a refresh when it ends, and one asked for inside the cooldown of the last is
+    deferred until the cooldown runs out. Until then the coordinator still holds a read from
+    before that learn, and the learned command has no button yet.
+    """
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=REQUEST_REFRESH_DEFAULT_COOLDOWN + 1)
+    )
+    await hass.async_block_till_done()
 
 
 def _command_entities(hass: HomeAssistant) -> list[str]:
@@ -532,21 +549,15 @@ async def test_the_action_creates_exactly_one_entity(hass, loaded) -> None:
 async def test_both_entrances_produce_the_same_record(hass, loaded) -> None:
     """Two doors, one learn. Ids stay monotonic and both commands land on the same device.
 
-    The refresh between the two learns is not decoration. `async_handle_entry_update` prunes the
-    entry's command metadata against `coordinator.data`, so until the bridge has been polled again
-    the listing it prunes against predates the command the flow has just written - and the write
-    is undone. That is a 0.2.0 defect on the options-flow path, not something this action
-    introduced, and it is left alone here rather than fixed in a UX change; see the notes in the
-    pull request. Real use hits it inside the 30-second poll interval, which is exactly the gap a
-    one-click button makes easy to land in.
+    The two learns run back to back, with no poll between them, which is how a user who learns a
+    remote's buttons one after another actually drives it.
     """
     bridge, entry = loaded
     fan = await async_create_target(hass, entry, "Ventilador", "fan")
 
     await _learn_via_menu(hass, entry, {CONF_NAME: "via_menu", CONF_TARGET_ID: fan.target_id})
-    await entry.runtime_data.coordinator.async_refresh()
-    await hass.async_block_till_done()
     await _learn_via_action(hass, entry, {CONF_NAME: "via_button", CONF_TARGET_ID: fan.target_id})
+    await _let_deferred_refreshes_land(hass)
 
     by_name = {name: cid for cid, name in bridge.commands.items()}
     assert set(by_name) == {"via_menu", "via_button"}
@@ -570,17 +581,25 @@ async def test_both_entrances_produce_the_same_record(hass, loaded) -> None:
     assert len(_command_entities(hass)) == 2, _command_entities(hass)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "0.2.0 defect, not introduced here: async_step_learned writes the new command's metadata,"
-        " the entry update listener runs async_handle_entry_update, and that prunes against the"
-        " last polled status - which does not list the command yet. The second learn inside one"
-        " poll interval loses its target and icon. Reproduced through the options menu too, so it"
-        " is not specific to the action. Delete this marker when reconcile.py stops pruning"
-        " commands newer than the listing it is pruning against."
-    ),
-)
+# Learning one command after another
+#
+# The request-refresh debouncer defers a second refresh inside its cooldown, so a learn that
+# follows another one finishes - and records its command's target and icon - while the coordinator
+# still holds a listing from before it. These tests drive that back-to-back case on purpose.
+
+
+def _ids(bridge: FakeBridge) -> dict[str, int]:
+    """The bridge's command ids, by name."""
+    return {name: cid for cid, name in bridge.commands.items()}
+
+
+def _record(hass: HomeAssistant, command_id: int) -> er.RegistryEntry | None:
+    """The entity registry record of one command's button, if it has one."""
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id("button", DOMAIN, f"{BRIDGE_ID}_{command_id}")
+    return None if entity_id is None else registry.async_get(entity_id)
+
+
 async def test_two_learns_inside_one_poll_interval_both_keep_their_target(
     hass, loaded
 ) -> None:
@@ -589,13 +608,224 @@ async def test_two_learns_inside_one_poll_interval_both_keep_their_target(
     fan = await async_create_target(hass, entry, "Ventilador", "fan")
 
     await _learn_via_action(hass, entry, {CONF_NAME: "one", CONF_TARGET_ID: fan.target_id})
-    await _learn_via_action(hass, entry, {CONF_NAME: "two", CONF_TARGET_ID: fan.target_id})
+    await _learn_via_action(
+        hass,
+        entry,
+        {CONF_NAME: "two", CONF_TARGET_ID: fan.target_id, CONF_ICON: "mdi:numeric-2"},
+    )
 
-    second = next(cid for cid, name in bridge.commands.items() if name == "two")
-    assert assigned_target(entry, second) is not None, (
+    ids = _ids(bridge)
+    assert entry.runtime_data.coordinator.data.next_command_id <= ids["two"], (
+        "the second learn has to finish before a read that lists it, or this proves nothing"
+    )
+    assert assigned_target(entry, ids["two"]) is not None, (
         "the second command lost the target the user chose for it"
     )
-    assert assigned_target(entry, second).target_id == fan.target_id
+    assert assigned_target(entry, ids["two"]).target_id == fan.target_id
+    assert command_meta(entry)[ids["two"]].icon == "mdi:numeric-2"
+    assert assigned_target(entry, ids["one"]).target_id == fan.target_id
+    assert command_meta(entry)[ids["one"]].icon == "mdi:fan"
+
+
+async def test_several_learns_in_a_row_all_keep_their_target_and_icon(
+    hass, loaded
+) -> None:
+    """A whole remote learned button by button, through both entrances, loses nothing."""
+    bridge, entry = loaded
+    fan = await async_create_target(hass, entry, "Ventilador", "fan")
+    gate = await async_create_target(hass, entry, "Portao", "gate")
+    wanted = {
+        "speed_1": (fan, "mdi:fan-speed-1"),
+        "speed_2": (fan, "mdi:fan-speed-2"),
+        "open": (gate, "mdi:gate-open"),
+        "speed_3": (fan, "mdi:fan-speed-3"),
+        "close": (gate, "mdi:gate"),
+    }
+
+    for index, (name, (target, icon)) in enumerate(wanted.items()):
+        learn = _learn_via_menu if index % 2 else _learn_via_action
+        result = await learn(
+            hass, entry, {CONF_NAME: name, CONF_TARGET_ID: target.target_id, CONF_ICON: icon}
+        )
+        assert result["reason"] == "learned", result
+
+    ids = _ids(bridge)
+    for name, (target, icon) in wanted.items():
+        assert command_meta(entry)[ids[name]].target_id == target.target_id, name
+        assert command_meta(entry)[ids[name]].icon == icon, name
+
+    await _let_deferred_refreshes_land(hass)
+
+    for name, (target, icon) in wanted.items():
+        assert command_meta(entry)[ids[name]].target_id == target.target_id, name
+        assert command_meta(entry)[ids[name]].icon == icon, name
+        record = _record(hass, ids[name])
+        assert record is not None, name
+        assert record.config_subentry_id == target.subentry_id, name
+
+
+async def test_a_command_deleted_on_the_device_is_still_pruned(hass, loaded) -> None:
+    """Keeping a newer command's metadata must not stop a removed command's from going."""
+    bridge, entry = loaded
+    fan = await async_create_target(hass, entry, "Ventilador", "fan")
+    await _learn_via_action(hass, entry, {CONF_NAME: "one", CONF_TARGET_ID: fan.target_id})
+    await _learn_via_action(hass, entry, {CONF_NAME: "two", CONF_TARGET_ID: fan.target_id})
+    await _let_deferred_refreshes_land(hass)
+    ids = _ids(bridge)
+    assert _record(hass, ids["one"]) is not None
+
+    # Deleted behind Home Assistant's back - on the bridge's own web page, say.
+    del bridge.commands[ids["one"]]
+    bridge.revision += 1
+    await entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert ids["one"] not in command_meta(entry)
+    assert _record(hass, ids["one"]) is None
+    assert assigned_target(entry, ids["two"]).target_id == fan.target_id
+
+
+async def test_the_update_path_still_prunes_what_its_listing_vouches_for(
+    hass, loaded
+) -> None:
+    """An entry update prunes a command its listing shows gone, even before a reconcile has."""
+    bridge, entry = loaded
+    fan = await async_create_target(hass, entry, "Ventilador", "fan")
+    await _learn_via_action(hass, entry, {CONF_NAME: "one", CONF_TARGET_ID: fan.target_id})
+    await _let_deferred_refreshes_land(hass)
+    command_id = _ids(bridge)["one"]
+
+    # The coordinator holds a read without it, and nothing has reconciled that read yet.
+    del bridge.commands[command_id]
+    bridge.revision += 1
+    coordinator = entry.runtime_data.coordinator
+    coordinator.data = await coordinator.transport.async_status()
+    await async_create_target(hass, entry, "Portao", "gate")
+
+    assert command_id not in command_meta(entry)
+
+
+async def test_a_restore_that_winds_the_counter_back_still_prunes(hass, loaded) -> None:
+    """Ids at or above a fresh read's counter are not the device's, and are not kept as if so.
+
+    Only the entry update path reads a listing that may be older than the metadata. A reconcile
+    prunes against the read that has just arrived, so when that read puts the device's counter
+    below an id Home Assistant knows - a restore from an older snapshot - the id is gone, and the
+    device will hand it out again for something else.
+    """
+    bridge, entry = loaded
+    fan = await async_create_target(hass, entry, "Ventilador", "fan")
+    await _learn_via_action(hass, entry, {CONF_NAME: "one", CONF_TARGET_ID: fan.target_id})
+    await _learn_via_action(hass, entry, {CONF_NAME: "two", CONF_TARGET_ID: fan.target_id})
+    await _let_deferred_refreshes_land(hass)
+    ids = _ids(bridge)
+
+    del bridge.commands[ids["two"]]
+    bridge.next_command_id = ids["two"]
+    bridge.revision += 1
+    await entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert ids["two"] not in command_meta(entry)
+    assert _record(hass, ids["two"]) is None
+    assert assigned_target(entry, ids["one"]).target_id == fan.target_id
+
+
+async def test_an_assignment_to_a_removed_target_is_still_cleared(hass, loaded) -> None:
+    """A command newer than the listing keeps its icon, but not a target that is gone."""
+    bridge, entry = loaded
+    fan = await async_create_target(hass, entry, "Ventilador", "fan")
+    gate = await async_create_target(hass, entry, "Portao", "gate")
+    await _learn_via_action(hass, entry, {CONF_NAME: "one", CONF_TARGET_ID: fan.target_id})
+    await _learn_via_action(
+        hass,
+        entry,
+        {CONF_NAME: "two", CONF_TARGET_ID: gate.target_id, CONF_ICON: "mdi:gate"},
+    )
+    ids = _ids(bridge)
+    assert entry.runtime_data.coordinator.data.next_command_id <= ids["two"]
+
+    hass.config_entries.async_remove_subentry(entry, gate.subentry_id)
+    await hass.async_block_till_done()
+
+    assert command_meta(entry)[ids["two"]].target_id is None
+    assert command_meta(entry)[ids["two"]].icon == "mdi:gate"
+    assert assigned_target(entry, ids["one"]).target_id == fan.target_id
+
+
+@pytest.mark.parametrize("untrusted", ["restore_incomplete", "identity_mismatch"])
+async def test_an_untrusted_listing_after_back_to_back_learns_keeps_everything(
+    hass, loaded, untrusted
+) -> None:
+    """Neither a mid-restore listing nor someone else's bridge is evidence that anything is gone."""
+    bridge, entry = loaded
+    fan = await async_create_target(hass, entry, "Ventilador", "fan")
+    await _learn_via_action(hass, entry, {CONF_NAME: "one", CONF_TARGET_ID: fan.target_id})
+    await _learn_via_action(hass, entry, {CONF_NAME: "two", CONF_TARGET_ID: fan.target_id})
+    await _let_deferred_refreshes_land(hass)
+    before = command_meta(entry)
+    assert len(before) == 2
+
+    if untrusted == "restore_incomplete":
+        bridge.restore_incomplete = True
+    else:
+        bridge.bridge_id = "0123456789abcdef0123456789abcdef"
+    bridge.commands = {}
+    bridge.revision += 1
+    await entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done()
+    # And an entry update on top, so both pruning paths see the untrusted listing.
+    await async_create_target(hass, entry, "Portao", "gate")
+
+    assert command_meta(entry) == before
+    for command_id in before:
+        assert _record(hass, command_id) is not None, command_id
+
+
+async def test_back_to_back_learns_create_each_entity_once(hass, loaded) -> None:
+    """One button per command, however the reads and the writes interleave."""
+    bridge, entry = loaded
+    fan = await async_create_target(hass, entry, "Ventilador", "fan")
+    for name in ("one", "two", "three"):
+        await _learn_via_action(hass, entry, {CONF_NAME: name, CONF_TARGET_ID: fan.target_id})
+    await _let_deferred_refreshes_land(hass)
+    for _ in range(2):
+        await entry.runtime_data.coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    # Counted rather than named: which entity id a new button is given depends on whether its
+    # refresh landed before or after the flow placed it, and that is not what this is about.
+    assert len(_command_entities(hass)) == 3, _command_entities(hass)
+    records = [_record(hass, cid) for cid in _ids(bridge).values()]
+    assert all(record is not None for record in records), _command_entities(hass)
+    assert len({record.entity_id for record in records}) == 3
+    assert {record.config_subentry_id for record in records} == {fan.subentry_id}
+    assert len({record.device_id for record in records}) == 1
+
+
+async def test_back_to_back_learns_survive_a_reload(hass, loaded) -> None:
+    """What back-to-back learns recorded is what the entry comes back with."""
+    bridge, entry = loaded
+    fan = await async_create_target(hass, entry, "Ventilador", "fan")
+    gate = await async_create_target(hass, entry, "Portao", "gate")
+    await _learn_via_action(hass, entry, {CONF_NAME: "one", CONF_TARGET_ID: fan.target_id})
+    await _learn_via_menu(hass, entry, {CONF_NAME: "two", CONF_TARGET_ID: gate.target_id})
+    await _learn_via_action(hass, entry, {CONF_NAME: "three", CONF_TARGET_ID: fan.target_id})
+    await _let_deferred_refreshes_land(hass)
+    meta = command_meta(entry)
+    placed = {cid: _record(hass, cid) for cid in _ids(bridge).values()}
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert command_meta(entry) == meta
+    for command_id, before in placed.items():
+        after = _record(hass, command_id)
+        assert after is not None, command_id
+        assert after.entity_id == before.entity_id
+        assert after.config_subentry_id == before.config_subentry_id
+        assert after.device_id == before.device_id
+    assert len(_command_entities(hass)) == 3, _command_entities(hass)
 
 
 async def test_the_entry_reloads_cleanly_after_the_action(hass, loaded) -> None:
