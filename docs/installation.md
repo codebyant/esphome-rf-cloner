@@ -82,7 +82,12 @@ with Home Assistant down — and out of Home Assistant.
 ### Home Assistant API
 
 The `api:` block is required. The integration goes through Home Assistant's existing ESPHome
-connection, so the node has to be adopted by Home Assistant in the ordinary way first. It is never
+connection, so the node has to be adopted by Home Assistant in the ordinary way first — it should
+be listed under **Settings → Devices & services → ESPHome** before you go on:
+
+![The ESPHome integration listing the RF Bridge node](../assets/screenshots/01-esphome-node.png)
+
+ It is never
 addressed by IP, so DHCP can move it freely.
 
 ### Building from a clone
@@ -120,20 +125,33 @@ Assistant.
 2. Pick the ESPHome node running the bridge. It has to be connected.
 3. Leave **Action prefix** alone unless you changed `rf_action_prefix` in the package.
 
+![The Connect an RF bridge dialogue](../assets/screenshots/02-connect-bridge.png)
+
 A new **RF Cloner bridge** device appears, linked to the ESPHome node. Commands already stored on
 the bridge are adopted immediately.
+
+The integration page now shows the bridge as a hub, with **Add an RF device** and **Learn command**
+at the top:
+
+![The RF Cloner Bridge integration page](../assets/screenshots/03-integration-page.png)
 
 If the node is rejected with *"That node exposes no rf_cloner actions"*, the node is not running
 `packages/api-actions.yaml`, or is not connected.
 
 ## 6. Learn your first command
 
-On the bridge's device page, **Configure**, then **Learn a command**. Name it, choose which RF
-device it belongs to - or leave it unassigned - then hold the button on the remote when the
-dialogue asks. A button entity appears under that name.
+Optionally, first [add an RF device](guides/add-an-rf-device.md) for the equipment the remote
+drives, so its commands land grouped together.
 
-Details, including grouping commands under RF devices, renaming, icons, deleting and the
-automation actions: [home-assistant.md](home-assistant.md).
+Then, on the integration page, **Learn command**. Name it, choose which RF device it belongs to —
+or leave it unassigned — then hold the button on the remote when the dialogue asks. A button
+entity appears under that name.
+
+![The Learn a command dialogue](../assets/screenshots/05-learn-command-form.png)
+
+The full walkthrough, including what to do when a learn fails, is
+[guides/learn-a-command.md](guides/learn-a-command.md). The reference for grouping, renaming,
+icons, deleting and the automation actions is [home-assistant.md](home-assistant.md).
 
 ## Upgrading
 

@@ -8,6 +8,8 @@ on a dashboard or call from an automation. No YAML editing, no recompile per com
 to identify. Learned commands live on the ESP32, so they survive reboots, firmware updates and a
 Home Assistant outage.
 
+![A ceiling fan's remote, learned button by button, as one Home Assistant device](assets/screenshots/07-rf-device-page.png)
+
 > [!NOTE]
 > Pre-release. The design is settled and validated on real hardware, but this has not yet been
 > used by anyone other than its author. Expect rough edges, and read the
@@ -81,6 +83,10 @@ replica.
 - An automatic **snapshot** of every command, waveforms included, kept in Home Assistant's own
   storage.
 
+Everything is managed from the integration's own page — no YAML, no Developer Tools:
+
+![The RF Cloner Bridge integration page, with Add an RF device and Learn command](assets/screenshots/03-integration-page.png)
+
 The integration talks to the node through Home Assistant's existing ESPHome connection. It opens
 no second connection and needs no IP address, so the bridge can move around on DHCP freely.
 
@@ -148,11 +154,19 @@ hand and restart.
 
 Full walkthrough: [docs/installation.md](docs/installation.md).
 
-### 3. Learn a command
+### 3. Group and learn
 
-On the bridge's device page, **Configure**, then **Learn a command**. Name it, choose which RF
-device it belongs to (or leave it unassigned), then hold the button on the remote when prompted.
-It appears as a button entity under that device.
+1. On the integration page, **Add an RF device** for the equipment — *Bedroom Fan*, type *Fan*,
+   area *Bedroom*.
+2. **Learn command**. Name it, choose that RF device, submit.
+3. Hold the button on the remote when the dialogue asks.
+
+![The Learn a command dialogue: name, RF device, icon](assets/screenshots/05-learn-command-form.png)
+
+It appears straight away as a button on the RF device's page, ready for a dashboard or an
+automation. Repeat for each button on the remote.
+
+Step by step, with what to do when a learn fails: [Learn a new command](docs/guides/learn-a-command.md).
 
 ## Limitations
 
@@ -170,6 +184,19 @@ It appears as a button entity under that device.
 - Infrared is out of scope. Use ESPHome's own IR components.
 
 ## Documentation
+
+### Guides
+
+Step-by-step, with screenshots.
+
+| | |
+|---|---|
+| [Learn a new command](docs/guides/learn-a-command.md) | Teach the bridge a remote button, relearn one that drifted |
+| [Add an RF device](docs/guides/add-an-rf-device.md) | Group a piece of equipment's commands under one device |
+| [Rename, move or delete a command](docs/guides/edit-move-or-delete-a-command.md) | Change a command after it is learned |
+| [Use your commands](docs/guides/use-your-commands.md) | Dashboards, automations, scripts, on-device replay |
+
+### Reference
 
 | | |
 |---|---|
