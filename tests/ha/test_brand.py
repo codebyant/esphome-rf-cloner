@@ -4,7 +4,7 @@ Home Assistant draws an integration's icon from `brands.home-assistant.io`, whic
 integrations that are already distributed - so until a pull request lands there, every page that
 shows this integration shows `icon not available` instead.
 
-2026.9 added a way out: `homeassistant.components.brands` checks the integration's own `brand`
+2026.3 added a way out: `homeassistant.components.brands` checks the integration's own `brand`
 directory before it goes to the CDN, for custom integrations only. That makes the icon a file in
 this repository rather than a dependency on someone else's merge queue.
 

@@ -33,6 +33,3 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # `brands` checks for an icon in home-assistant/brands, which only accepts integrations
-          # that are already distributed. Drop this once the brands pull request is merged.
-          ignore: brands
