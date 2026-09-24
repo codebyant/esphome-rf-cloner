@@ -118,6 +118,20 @@ differently from its surroundings will get that comment in review.
   [its index](assets/screenshots/README.md).
 - No version bumps. Releases are cut separately.
 
+## Releases
+
+Every release states whether the ESPHome bridge has to be updated, so no user has to work it out
+from the diff. Before cutting one, ask: did `components/`, `packages/` or anything else the bridge
+exposes to Home Assistant — its actions, what they return, the storage format — change since the
+last tag?
+
+- **No**: the release notes say *No ESPHome bridge update is required.* Nothing else moves.
+- **Yes**: the release notes open with **ESPHome bridge update required**, name the new tag, and
+  say what to change and in which order. After the tag is pushed, a separate commit moves the
+  pinned tag in `config/rf-bridge-remote.yaml`, `docs/installation.md`, `docs/configuration.md`
+  and the README to it. Never in the release commit itself: until the tag exists, that ref does not
+  resolve, and the published-install-path check fails.
+
 ## Reporting a problem
 
 [Open an issue](https://github.com/codebyant/esphome-rf-cloner/issues). For anything involving

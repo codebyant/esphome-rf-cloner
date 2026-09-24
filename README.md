@@ -132,12 +132,16 @@ directory. It pulls everything from this repository — nothing to clone:
 
 ```yaml
 external_components:
-  - source: github://codebyant/esphome-rf-cloner@main
+  - source: github://codebyant/esphome-rf-cloner@v0.2.1
     components: [rf_cloner]
 ```
 
 Adjust the pins and the radio settings for your board, add `wifi_ssid`, `wifi_password` and
 `api_key` to your ESPHome secrets, and flash.
+
+The bridge is pinned to a release tag, so it does not need reflashing for every release: the
+Home Assistant integration updates through HACS, and a release that needs a new bridge says so
+in its notes. See [Updating](docs/installation.md#updating).
 
 ### 2. The Home Assistant integration
 

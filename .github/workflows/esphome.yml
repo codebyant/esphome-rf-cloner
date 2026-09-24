@@ -61,11 +61,11 @@ jobs:
 
   published:
     name: Published install path
-    # config/rf-bridge-remote.yaml resolves the component and the packages from GitHub, so it
-    # exercises whatever is on the default branch and not the commit under test. Running it on a
-    # pull request would validate the wrong code and report the wrong result, so it runs on the
+    # config/rf-bridge-remote.yaml resolves the component and the packages from GitHub at the
+    # release tag it pins, so it exercises that tag and not the commit under test. It runs on the
     # branch itself and weekly - enough to notice that the documented `github://` path has stopped
-    # resolving.
+    # resolving, or that the pinned tag no longer validates against a current ESPHome. A tag named
+    # there before it is pushed fails this job, which is why the pin moves only after a release.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:

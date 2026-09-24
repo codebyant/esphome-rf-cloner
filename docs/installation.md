@@ -35,13 +35,13 @@ there is nothing to clone:
 
 ```yaml
 external_components:
-  - source: github://codebyant/esphome-rf-cloner@main
+  - source: github://codebyant/esphome-rf-cloner@v0.2.1
     components: [rf_cloner]
 
 packages:
   rf_cloner:
     url: https://github.com/codebyant/esphome-rf-cloner
-    ref: main
+    ref: v0.2.1
     refresh: 1d
     files:
       - path: packages/api-actions.yaml
@@ -53,8 +53,9 @@ packages:
           rf_hide_in_ha: "false"
 ```
 
-`@main` and `ref: main` track the default branch. Once you are happy with a build, pin both to a
-release tag so a rebuild cannot pick up a change you did not ask for.
+Both refs name a release tag, and must name the same one. A rebuild gets exactly the firmware it
+got last time rather than whatever is on the default branch that day. You move the tag only when a
+release says the bridge needs updating — see [Updating](#updating).
 
 Then:
 
@@ -153,15 +154,19 @@ The full walkthrough, including what to do when a learn fails, is
 [guides/learn-a-command.md](guides/learn-a-command.md). The reference for grouping, renaming,
 icons, deleting and the automation actions is [home-assistant.md](home-assistant.md).
 
-## Upgrading
+## Updating
 
-The two halves version together but update independently.
+RF Cloner has two parts, released under one version number but updated separately.
 
-- **Firmware**: rebuild in ESPHome. Stored commands survive a firmware update.
-- **Integration**: update in HACS, or recopy the folder, then restart Home Assistant.
+- **The Home Assistant integration** updates through HACS like any other (or recopy the folder),
+  then restart Home Assistant.
+- **The ESPHome bridge** does not need reflashing for every release. Most releases change only the
+  integration, and their notes say *No ESPHome bridge update is required*.
 
-Neither is expected to need the other to be updated in lockstep. Anything that does will say so in
-the release notes.
+When a release does change the bridge, its notes open with **ESPHome bridge update required** and
+name the tag to use. Then move both refs in your bridge's YAML — `@vX.Y.Z` on `source:` and
+`ref: vX.Y.Z` — to that tag, rebuild and flash, and update the integration. Stored commands survive
+a firmware update.
 
 ## Uninstalling
 
