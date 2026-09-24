@@ -115,12 +115,13 @@ Or straight from the repository, without vendoring anything:
 
 ```yaml
 external_components:
-  - source: github://codebyant/esphome-rf-cloner
+  - source: github://codebyant/esphome-rf-cloner@v0.2.1
     components: [rf_cloner]
 
 packages:
   rf_bridge:
     url: https://github.com/codebyant/esphome-rf-cloner
+    ref: v0.2.1
     files:
       - path: packages/controls.yaml
         vars: {rf_cloner_id: cloner}
@@ -128,6 +129,9 @@ packages:
         vars: {rf_cloner_id: cloner}
     refresh: 1d
 ```
+
+Pin both to the same release tag, as above: without one, a rebuild takes whatever is on the
+default branch. [Updating](installation.md#updating) covers when to move it.
 
 Both packages require an `rf_cloner:` component with a matching id, and a `remote_receiver` and
 `remote_transmitter` for it to use. Neither contains secrets, so both work as remote packages.

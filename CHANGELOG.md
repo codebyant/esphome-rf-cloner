@@ -12,6 +12,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- **The ESPHome bridge is pinned to a release tag**, not `main`, in `config/rf-bridge-remote.yaml`
+  and every example that pulls from GitHub, so a rebuild can no longer pick up an unreleased
+  change. It starts at `v0.2.1`, whose ESPHome side is identical to every earlier release. The
+  bridge no longer needs reflashing for each release: the integration updates through HACS, and
+  release notes now say explicitly whether an ESPHome bridge update is required.
+
 ## [0.2.1] — 2026-09-23
 
 A maintenance release on top of 0.2.0. Nothing about how commands are stored, identified, backed

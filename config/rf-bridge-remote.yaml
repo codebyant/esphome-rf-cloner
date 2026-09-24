@@ -6,9 +6,11 @@
 #
 # Verify the wiring with config/hardware-check.yaml first - see docs/hardware.md.
 #
-# `@main` tracks the default branch. Pin it to a release tag on every `source:` and `ref:` below
-# once you have a version you are happy with, so a firmware rebuild cannot pick up a change you
-# did not ask for.
+# The component and the packages are pinned to a release tag, and the two refs below must name the
+# same one. A rebuild therefore gets exactly the firmware it got last time, never whatever happens
+# to be on the default branch that day. Most releases change only the Home Assistant integration
+# and leave this tag alone; when one needs a new bridge, its release notes say so and name the tag
+# to move to. See docs/installation.md#updating.
 
 substitutions:
   name: rf-bridge
@@ -24,13 +26,13 @@ esphome:
       - cc1101.begin_rx: cc1101_radio
 
 external_components:
-  - source: github://codebyant/esphome-rf-cloner@main
+  - source: github://codebyant/esphome-rf-cloner@v0.2.1
     components: [rf_cloner]
 
 packages:
   rf_cloner:
     url: https://github.com/codebyant/esphome-rf-cloner
-    ref: main
+    ref: v0.2.1
     refresh: 1d
     files:
       # Home Assistant actions. Required by the Home Assistant integration, which speaks to the
