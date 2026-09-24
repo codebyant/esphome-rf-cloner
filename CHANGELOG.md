@@ -12,14 +12,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Documentation
+## [0.2.1] — 2026-09-23
 
-- **Step-by-step guides with screenshots**, in `docs/guides/`: learning a new command (and
-  relearning one), adding an RF device, renaming, moving and deleting a command, and using
-  commands on dashboards, in automations and on the bridge itself. The README, installation and
-  Home Assistant pages now show the real dialogues, and their directions point at where things
-  actually are - *Add an RF device* and *Learn command* on the integration page, not on the
-  bridge's device page.
+A maintenance release on top of 0.2.0. Nothing about how commands are stored, identified, backed
+up or restored has changed, the ESPHome component is untouched, and no migration runs: updating
+the integration is all there is to it.
 
 ### Fixed
 
@@ -30,15 +27,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on the whole form when it meets one. The value stored is still the ESPHome config entry id, so
   nothing else changes. Setting up with no ESPHome integration at all now says so instead of
   offering an empty picker.
+- **A command learned right after another could lose its RF device and icon.** Its button came up
+  on no device, or not at all. The metadata was written, then pruned against a read of the bridge
+  taken before the command existed, because Home Assistant defers a refresh requested within 10
+  seconds of the last. Ids the bridge had not yet handed out when that read was taken are now left
+  alone until a read that could list them arrives. Present since 0.2.0, through either way of
+  learning.
 
 ### Added
 
 - **The integration has its own icon.** Home Assistant showed *icon not available* everywhere this
   integration appeared, because it draws integration icons from `brands.home-assistant.io` and
-  that repository only accepts integrations that are already distributed. Home Assistant 2026.9
-  looks in a custom integration's own `brand/` directory first, so the icon now ships here and no
-  longer waits on a pull request to someone else's repository. One `icon.png` covers every variant
-  Home Assistant asks for - the 2x, the logo and the dark-mode forms all fall back to it.
+  that repository only accepts integrations that are already distributed. Home Assistant 2026.3
+  and later look in a custom integration's own `brand/` directory first, so the icon now ships
+  here and no longer waits on a pull request to someone else's repository. One `icon.png` covers
+  every variant Home Assistant asks for - the 2x, the logo and the dark-mode forms all fall back
+  to it.
 - **`Learn command` on the integration page**, beside *Add an RF device*. Learning was reachable
   only through the bridge's **Configure** menu, two screens in, which is a strange place for the
   thing this integration exists to do. The button opens the same learn form directly — name, RF
@@ -46,6 +50,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   it. Both entrances run the same code, so a command learned either way is the same record.
   Existing installs get the button on update; nothing is migrated and nothing is stored
   differently.
+
+### Documentation
+
+- **Step-by-step guides with screenshots**, in `docs/guides/`: learning a new command (and
+  relearning one), adding an RF device, renaming, moving and deleting a command, and using
+  commands on dashboards, in automations and on the bridge itself. The README, installation and
+  Home Assistant pages now show the real dialogues, and their directions point at where things
+  actually are - *Add an RF device* and *Learn command* on the integration page, not on the
+  bridge's device page.
+- The README links the in-depth write-up of how the project was built.
 
 ## [0.2.0] — 2026-09-18
 
@@ -151,6 +165,7 @@ First public release.
 - Home Assistant's snapshot is a faithful mirror of the device, not an undo buffer for a
   destructive action you asked for.
 
-[Unreleased]: https://github.com/codebyant/esphome-rf-cloner/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/codebyant/esphome-rf-cloner/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/codebyant/esphome-rf-cloner/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/codebyant/esphome-rf-cloner/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/codebyant/esphome-rf-cloner/releases/tag/v0.1.0
